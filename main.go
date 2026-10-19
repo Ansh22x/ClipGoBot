@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"tg-media-bot/internal/bot"
 	"tg-media-bot/internal/config"
@@ -43,7 +45,41 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// 5. Run bot
+	// 5. Start lightweight HTTP health server for Render Web Service ($PORT)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "10000" // default Render web service port
+	}
+
+	httpMux := http.NewServeMux()
+	httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok","bot":"@ClipGo1Bot","service":"ClipGo Downloader"}`))
+	})
+	httpMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	})
+
+	httpServer := &http.Server{
+		Addr:    ":" + port,
+		Handler: httpMux,
+	}
+
+	go func() {
+		log.Printf("HTTP health check server listening on :%s for Render...", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server warning: %v", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, sCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer sCancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+
+	// 6. Run bot polling
 	if err := engine.Start(ctx); err != nil {
 		log.Fatalf("Bot encountered fatal error: %v", err)
 	}
