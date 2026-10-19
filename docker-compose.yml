@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  tg-downloader-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg_media_downloader_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+    environment:
+      - DB_PATH=/app/data/bot.db
+      - DOWNLOAD_DIR=/app/downloads
+      - MAX_CONCURRENT_DOWNLOADS=5
+      - TELEGRAM_UPLOAD_LIMIT_MB=50
+      - FREE_DAILY_QUOTA=5
+      - RATE_LIMIT_COOLDOWN_SEC=3

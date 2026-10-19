@@ -1,0 +1,21 @@
+# Binaries and build artifacts
+/bot
+bot.exe
+*.exe
+
+# Database and secrets
+data/*.db
+data/*.db-wal
+data/*.db-shm
+!data/.gitkeep
+.env
+
+# Temporary downloaded media
+downloads/*
+!downloads/.gitkeep
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
