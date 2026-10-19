@@ -9,8 +9,8 @@ FROM golang:1.23-alpine AS builder
 WORKDIR /build
 
 # Cache Go modules
-COPY go.mod ./
-RUN go mod download || true
+COPY go.mod go.sum ./
+RUN go mod download
 
 # Copy source code and build statically linked binary without CGO
 COPY . .

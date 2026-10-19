@@ -548,9 +548,21 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 
 	result, err := h.dl.DownloadMedia(ctxTimeout, user.Id, extracted.URL, extracted.Platform, progressCallback)
 	if err != nil {
-		errMsg := ResolveErrorMessage(err.Error())
-		_, _, _ = statusMsg.EditText(b, errMsg, nil)
-		_ = h.database.UpdateDownloadFailed(dbRecordID, err.Error())
+		rawErr := err.Error()
+		var errMsg string
+		if strings.Contains(rawErr, "Sign in to confirm you’re not a bot") || strings.Contains(rawErr, "Sign in to confirm") {
+			errMsg = "❌ <b>YouTube Anti-Bot Check:</b> YouTube blocked this server request asking for sign-in. Try another video or contact admin to provide cookies.txt."
+		} else if strings.Contains(rawErr, "Video unavailable") || strings.Contains(rawErr, "Private video") {
+			errMsg = "❌ <b>Video Unavailable:</b> This video is private, deleted, or region-restricted."
+		} else if strings.Contains(rawErr, "Too Many Requests") || strings.Contains(rawErr, "429") {
+			errMsg = "⏳ <b>YouTube Rate Limit:</b> Server IP received 429 Too Many Requests from YouTube. Please wait a few minutes."
+		} else if strings.HasPrefix(rawErr, "ERR_DOWNLOAD_FAILED") {
+			errMsg = ErrDownloadFailed
+		} else {
+			errMsg = ResolveErrorMessage(rawErr)
+		}
+		_, _, _ = statusMsg.EditText(b, errMsg, &gotgbot.EditMessageTextOpts{ParseMode: "HTML"})
+		_ = h.database.UpdateDownloadFailed(dbRecordID, rawErr)
 		return nil
 	}
 

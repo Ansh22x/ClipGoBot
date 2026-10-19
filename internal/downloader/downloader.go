@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +72,20 @@ func (d *Downloader) CancelUserDownload(userID int64) bool {
 	return false
 }
 
+func getCookieArgs() []string {
+	cookieLocations := []string{
+		"cookies.txt",
+		"data/cookies.txt",
+		"/app/data/cookies.txt",
+	}
+	for _, p := range cookieLocations {
+		if _, err := os.Stat(p); err == nil {
+			return []string{"--cookies", p}
+		}
+	}
+	return nil
+}
+
 // FetchMetadata retrieves video metadata without downloading video stream
 func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetadata, error) {
 	// Shell injection prevention: slice arguments strictly without invoking a shell
@@ -79,8 +94,11 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--no-warnings",
 		"--no-playlist",
 		"--skip-download",
-		url,
+		"--extractor-args", "youtube:player_client=android,ios,web",
+		"--geo-bypass",
 	}
+	args = append(args, getCookieArgs()...)
+	args = append(args, url)
 
 	cmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, args...)
 	output, err := cmd.Output()
@@ -146,18 +164,25 @@ func (d *Downloader) DownloadMedia(
 
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
 
+	// Format selector: choose best video + best audio and remux to mp4
+	formatSelector := "bestvideo+bestaudio/best"
+
 	// 6. Execute yt-dlp download with strict argument slice (prevent shell injection)
 	args := []string{
 		"--newline",
 		"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-		"-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+		"-f", formatSelector,
 		"--merge-output-format", "mp4",
 		"--write-thumbnail",
 		"--convert-thumbnails", "jpg",
 		"--no-playlist",
+		"--extractor-args", "youtube:player_client=android,ios,web",
+		"--geo-bypass",
+		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 		"-o", outputPattern,
-		targetURL,
 	}
+	args = append(args, getCookieArgs()...)
+	args = append(args, targetURL)
 
 	cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
 
@@ -171,10 +196,16 @@ func (d *Downloader) DownloadMedia(
 		return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
 	}
 
-	// Read progress in real-time
+	// Read progress in real-time & keep last lines for error diagnostics
+	var lastOutputLines []string
 	scanner := bufio.NewScanner(stdoutPipe)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if len(lastOutputLines) >= 8 {
+			lastOutputLines = lastOutputLines[1:]
+		}
+		lastOutputLines = append(lastOutputLines, line)
+
 		if info := ParseProgressLine(line); info != nil {
 			tracker.Update(info)
 		}
@@ -184,7 +215,9 @@ func (d *Downloader) DownloadMedia(
 		if userCtx.Err() != nil {
 			return nil, errors.New("ERR_CANCELLED")
 		}
-		return nil, errors.New("ERR_DOWNLOAD_FAILED")
+		errDetails := strings.Join(lastOutputLines, " | ")
+		log.Printf("[yt-dlp download error] user=%d url=%s: %s", userID, targetURL, errDetails)
+		return nil, fmt.Errorf("ERR_DOWNLOAD_FAILED: %s", errDetails)
 	}
 
 	tracker.Finish("⚡ <b>Download complete! Preparing to upload...</b>")
@@ -193,9 +226,19 @@ func (d *Downloader) DownloadMedia(
 	filePattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.mp4", userID, meta.ID))
 	matches, _ := filepath.Glob(filePattern)
 	if len(matches) == 0 {
-		// Fallback glob if ID differed
 		filePattern = filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.mp4", userID))
 		matches, _ = filepath.Glob(filePattern)
+	}
+	if len(matches) == 0 {
+		// Fallback glob if saved under other container
+		allMatches, _ := filepath.Glob(filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.*", userID)))
+		for _, m := range allMatches {
+			ext := strings.ToLower(filepath.Ext(m))
+			if ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".mov" || ext == ".ts" {
+				matches = append(matches, m)
+				break
+			}
+		}
 	}
 
 	if len(matches) == 0 {
