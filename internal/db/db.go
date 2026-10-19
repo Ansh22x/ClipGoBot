@@ -83,10 +83,27 @@ func (db *DB) createSchema() error {
 		FOREIGN KEY(telegram_id) REFERENCES users(telegram_id)
 	);
 
+	CREATE TABLE IF NOT EXISTS groups (
+		chat_id INTEGER PRIMARY KEY,
+		title TEXT,
+		license_key TEXT,
+		plan TEXT DEFAULT 'free',
+		status TEXT DEFAULT 'active',
+		daily_quota INTEGER DEFAULT 50,
+		daily_downloads INTEGER DEFAULT 0,
+		last_download_at DATETIME,
+		quota_reset_at DATETIME,
+		expires_at DATETIME,
+		activated_by INTEGER,
+		registered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(license_key) REFERENCES licenses(key)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);
 	CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
 	CREATE INDEX IF NOT EXISTS idx_downloads_telegram_id ON downloads(telegram_id);
 	CREATE INDEX IF NOT EXISTS idx_users_expires_at ON users(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_groups_chat_id ON groups(chat_id);
 	`
 	_, err := db.Exec(schema)
 	return err

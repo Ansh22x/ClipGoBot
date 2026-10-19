@@ -11,6 +11,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers"
+	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/callbackquery"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 
 	"tg-media-bot/internal/config"
@@ -80,15 +81,19 @@ func (e *BotEngine) registerHandlers() {
 
 	d := e.dispatcher
 
-	// 8 User Commands (wrapped in Auth & Rate Limit middleware)
+	// User Commands (wrapped in Auth & Rate Limit middleware)
 	d.AddHandler(handlers.NewCommand("start", mw.AuthAndRateLimit(userH.HandleStart)))
 	d.AddHandler(handlers.NewCommand("help", mw.AuthAndRateLimit(userH.HandleHelp)))
 	d.AddHandler(handlers.NewCommand("status", mw.AuthAndRateLimit(userH.HandleStatus)))
 	d.AddHandler(handlers.NewCommand("redeem", mw.AuthAndRateLimit(userH.HandleRedeem)))
+	d.AddHandler(handlers.NewCommand("activategroup", mw.AuthAndRateLimit(userH.HandleActivateGroup)))
 	d.AddHandler(handlers.NewCommand("plans", mw.AuthAndRateLimit(userH.HandlePlans)))
 	d.AddHandler(handlers.NewCommand("stats", mw.AuthAndRateLimit(userH.HandleStats)))
 	d.AddHandler(handlers.NewCommand("ping", mw.AuthAndRateLimit(userH.HandlePing)))
 	d.AddHandler(handlers.NewCommand("cancel", mw.AuthAndRateLimit(userH.HandleCancel)))
+
+	// Callback query handler for VIP purchase requests
+	d.AddHandler(handlers.NewCallback(callbackquery.Prefix("buy_plan:"), userH.HandleBuyPlanCallback))
 
 	// 10 Admin Commands (wrapped in Admin authorization check)
 	d.AddHandler(handlers.NewCommand("genkey", mw.RequireAdmin(adminH.HandleGenKey)))
@@ -112,10 +117,46 @@ func (e *BotEngine) registerHandlers() {
 	})))
 }
 
+func (e *BotEngine) registerTelegramCommands() {
+	// Register user commands visible to all users
+	userCmds := []gotgbot.BotCommand{
+		{Command: "start", Description: "Start the bot & main menu"},
+		{Command: "help", Description: "How to download & command guide"},
+		{Command: "status", Description: "Check your subscription & quota"},
+		{Command: "plans", Description: "View VIP plans & purchase access"},
+		{Command: "redeem", Description: "Redeem a license key"},
+		{Command: "activategroup", Description: "Activate VIP features for this group"},
+		{Command: "stats", Description: "View your personal download stats"},
+		{Command: "ping", Description: "Check server status & latency"},
+		{Command: "cancel", Description: "Abort your active download"},
+	}
+	_, _ = e.bot.SetMyCommands(userCmds, nil)
+
+	// Register admin commands for chat administrators scope
+	adminCmds := append(userCmds, []gotgbot.BotCommand{
+		{Command: "genkey", Description: "[Admin] Generate VIP license keys"},
+		{Command: "revokekey", Description: "[Admin] Revoke a license key"},
+		{Command: "listkeys", Description: "[Admin] List recent license keys"},
+		{Command: "ban", Description: "[Admin] Ban user by ID/username/reply"},
+		{Command: "unban", Description: "[Admin] Unban user by ID or username"},
+		{Command: "user", Description: "[Admin] Inspect user profile"},
+		{Command: "setquota", Description: "[Admin] Update user daily quota"},
+		{Command: "broadcast", Description: "[Admin] Broadcast message to all users"},
+		{Command: "stats_admin", Description: "[Admin] View system analytics & memory"},
+		{Command: "logs", Description: "[Admin] View recent server logs"},
+	}...)
+	_, _ = e.bot.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
+		Scope: gotgbot.BotCommandScopeAllChatAdministrators{},
+	})
+}
+
 // Start begins long-polling updates and initiates background jobs
 func (e *BotEngine) Start(ctx context.Context) error {
 	log.Printf("Starting bot @%s (ID: %d)...", e.bot.Username, e.bot.Id)
 	GlobalLogBuffer.Append(fmt.Sprintf("Bot started as @%s", e.bot.Username))
+
+	// Register bot command list in Telegram UI
+	e.registerTelegramCommands()
 
 	// Launch background jobs
 	jobs := NewBackgroundJobs(e.cfg, e.database, e.bot)
@@ -126,7 +167,7 @@ func (e *BotEngine) Start(ctx context.Context) error {
 		DropPendingUpdates: true,
 		GetUpdatesOpts: &gotgbot.GetUpdatesOpts{
 			Timeout:        30,
-			AllowedUpdates: []string{"message"},
+			AllowedUpdates: []string{"message", "callback_query"},
 		},
 	})
 	if err != nil {

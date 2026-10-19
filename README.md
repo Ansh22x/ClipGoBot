@@ -124,15 +124,16 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 ---
 
-## 👤 8 User Commands
+## 👤 User Commands
 
 | Command | Description |
 |---|---|
 | `/start` | Welcomes user, registers profile in SQLite, displays quick-start guide |
 | `/help` | Complete instruction guide, rules, and supported formats |
-| `/status` | Shows plan tier, masked license key, today's quota usage, and expiry |
+| `/status` | Shows personal plan, group VIP plan (in groups), quota, and expiry |
 | `/redeem <key>` | Redeems a license key, upgrades plan, and extends validity |
-| `/plans` | Details VIP tiers, benefits, and how to purchase |
+| `/activategroup <key>` | Activates VIP downloads and high quota for an entire group chat |
+| `/plans` | Interactive menu with buttons to buy plans & notify owner instantly |
 | `/stats` | Personal metrics: total downloads, data transferred, favorite platform |
 | `/ping` | Server health, API roundtrip latency, and uptime |
 | `/cancel` | Instantly aborts any ongoing download task for the user |
@@ -141,7 +142,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 ## 🔗 Raw Link Detection (No `/download` Needed)
 
-Users simply paste links directly into chat. Built-in regex matches:
+Users simply paste links directly into chat or group. Built-in regex matches:
 - **YouTube:** Videos, Shorts, Live, Embeds (`youtube.com/watch?v=`, `youtu.be/`, `youtube.com/shorts/`)
 - **Instagram:** Reels, Posts, Stories, TV (`instagram.com/p/`, `instagram.com/reel/`)
 - **TikTok:** Videos, Shorts (`tiktok.com/@user/video/`, `vm.tiktok.com/`)
@@ -153,7 +154,7 @@ Users simply paste links directly into chat. Built-in regex matches:
 
 1. **Detection:** Catch message text matching platform regexes.
 2. **Auth:** Ensure user exists; block if banned.
-3. **Plan & Quota Check:** Verify quota remaining; check for expired plan.
+3. **Plan & Quota Check:** Verify group VIP quota (if in group) or personal quota.
 4. **Concurrency Check:** Prevent user duplicate downloads (`sync.Map`).
 5. **Semaphore Acquisition:** Acquire slot in global concurrency buffer (`chan struct{}`).
 6. **User Cancellation Context:** Register cancellation hook for `/cancel`.
@@ -163,20 +164,20 @@ Users simply paste links directly into chat. Built-in regex matches:
 10. **Stream Download:** Execute `yt-dlp` with real-time stdout progress.
 11. **Anti-Flood Checkpoint Updates:** Throttled progress message updates.
 12. **Telegram Upload:** Transmit MP4 via `bot.SendVideo` with title, platform, duration, and thumbnail.
-13. **Cleanup & Logging:** Remove local temp files, insert record in SQLite `downloads`, increment user quota.
+13. **Cleanup & Logging:** Remove local temp files, insert record in SQLite `downloads`, increment user or group quota.
 
 ---
 
-## 🛡️ 10 Admin Commands
+## 🛡️ Admin Commands (Usable in DM or Groups)
 
 | Command | Syntax & Example | Output Example |
 |---|---|---|
 | `/genkey` | `/genkey monthly 30 3` | `✅ Generated 3 key(s) for plan 'monthly' (30 days)` |
 | `/revokekey` | `/revokekey PREM-XXXX-XXXX-XXXX` | `✅ License key 'PREM-XXXX' has been revoked.` |
 | `/listkeys` | `/listkeys [active\|redeemed\|all]` | Lists recent 15 keys with activation counts and status |
-| `/ban` | `/ban 123456789 Spamming` | `⛔ User 123456789 has been banned.` |
-| `/unban` | `/unban 123456789` | `✅ User 123456789 has been unbanned.` |
-| `/user` | `/user 123456789` | Full user card: ID, username, plan, quota, total downloads |
+| `/ban` | `/ban 123456789 [reason]`, `/ban @username`, or reply with `/ban` | `⛔ User 123456789 (@username) has been banned.` |
+| `/unban` | `/unban 123456789`, `/unban @username`, or reply with `/unban` | `✅ User 123456789 has been unbanned.` |
+| `/user` | `/user 123456789`, `/user @username`, or reply with `/user` | Full user card: ID, username, plan, quota, total downloads |
 | `/setquota` | `/setquota 123456789 50` | `✅ Daily quota for user 123456789 updated to 50.` |
 | `/broadcast` | `/broadcast Server maintenance at 02:00` | Broadcasts message to all active users with live progress |
 | `/stats_admin` | `/stats_admin` | System analytics: total users, active VIPs, memory, uptime |

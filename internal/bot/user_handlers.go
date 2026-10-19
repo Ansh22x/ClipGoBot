@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,7 +58,8 @@ Simply <b>send or paste any media link</b> directly into this chat! No prefix or
 /help - View full guide and options
 /status - Check your subscription and daily quota
 /redeem &lt;key&gt; - Redeem a license key
-/plans - View VIP subscription plans
+/activategroup &lt;key&gt; - Activate VIP for a whole group
+/plans - View VIP subscription plans & buy VIP
 /stats - Your download statistics
 /ping - Bot health and response latency
 /cancel - Abort your ongoing download`, htmlEscape(user.FirstName))
@@ -81,13 +83,15 @@ The bot will automatically detect it, download the highest quality MP4, and uplo
 • /help - Display this manual
 • /status - Check daily quota remaining & plan expiry
 • /redeem &lt;KEY&gt; - Activate a premium subscription key
-• /plans - See pricing and duration of premium tiers
+• /activategroup &lt;KEY&gt; - Activate VIP downloads for this entire group
+• /plans - See pricing and duration of premium tiers (click to buy)
 • /stats - Personal download count and data metrics
 • /ping - Check system latency and server status
 • /cancel - Cancel an active download in progress
 
 3️⃣ <b>Limits & Rules:</b>
 • Free tier users have 5 downloads per 24 hours.
+• Group VIP plans provide high collective quotas for all group members!
 • Maximum file size via standard Telegram API is 50 MB.
 • Upgrade via /plans to increase your quota and unlock priority speed!`
 
@@ -131,18 +135,37 @@ func (h *UserHandler) HandleStatus(b *gotgbot.Bot, ctx *ext.Context) error {
 		remainingQuota = 0
 	}
 
+	var groupText string
+	if ctx.EffectiveChat.Type != "private" {
+		g, _ := h.database.GetGroup(ctx.EffectiveChat.Id)
+		if g != nil && g.Plan != "free" {
+			gExp := "Permanent (Lifetime VIP)"
+			if g.ExpiresAt != nil {
+				gExp = g.ExpiresAt.Format("02 Jan 2006, 15:04 UTC")
+			}
+			gRemaining := g.DailyQuota - g.DailyDownloads
+			if gRemaining < 0 {
+				gRemaining = 0
+			}
+			groupText = fmt.Sprintf("\n\n👥 <b>Group VIP Status:</b>\n🏷️ <b>Plan:</b> <code>%s</code>\n📅 <b>Expires:</b> %s\n🔋 <b>Group Quota Remaining:</b> <b>%d / %d</b>",
+				strings.ToUpper(g.Plan), gExp, gRemaining, g.DailyQuota)
+		} else {
+			groupText = "\n\n👥 <b>Group Status:</b> Free tier (Use <code>/activategroup &lt;KEY&gt;</code> to activate VIP for this group!)"
+		}
+	}
+
 	statusText := fmt.Sprintf(`📊 <b>Account Status</b>
 
 👤 <b>User:</b> %s (<code>%d</code>)
-🏷️ <b>Plan:</b> <code>%s</code>
+🏷️ <b>Personal Plan:</b> <code>%s</code>
 ⚡ <b>Status:</b> <code>%s</code>
 🔑 <b>License:</b> <code>%s</code>
 📅 <b>Expires:</b> %s
 
-📈 <b>Daily Quota:</b> %d / %d used
-🔋 <b>Remaining Today:</b> <b>%d downloads</b>`,
+📈 <b>Personal Quota:</b> %d / %d used
+🔋 <b>Remaining Today:</b> <b>%d downloads</b>%s`,
 		htmlEscape(user.FirstName), user.Id, strings.ToUpper(u.Plan), strings.ToUpper(u.Status),
-		keyMasked, expiryStr, u.DailyDownloads, u.DailyQuota, remainingQuota)
+		keyMasked, expiryStr, u.DailyDownloads, u.DailyQuota, remainingQuota, groupText)
 
 	_, err = msg.Reply(b, statusText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
@@ -195,7 +218,7 @@ func (h *UserHandler) HandlePlans(b *gotgbot.Bot, ctx *ext.Context) error {
 1️⃣ <b>Daily Pass</b>
 • Duration: 24 Hours
 • Quota: 30 downloads / day
-• Max Quality & No Cooldowns
+• Max Quality & Fast Speed
 
 2️⃣ <b>Weekly VIP</b>
 • Duration: 7 Days
@@ -212,9 +235,176 @@ func (h *UserHandler) HandlePlans(b *gotgbot.Bot, ctx *ext.Context) error {
 • Quota: Unlimited downloads
 • VIP Badge & Dedicated Speed
 
-💬 <i>To purchase a license key, please contact the bot administrator. Once you have a key, redeem it via <code>/redeem &lt;KEY&gt;</code></i>`
+💡 <b>Select a plan below to request purchase:</b> The owner will be notified immediately!`
 
-	_, err := msg.Reply(b, plansMsg, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	buttons := gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
+			{
+				{Text: "💎 Buy Daily Pass", CallbackData: "buy_plan:daily"},
+				{Text: "⭐ Buy Weekly VIP", CallbackData: "buy_plan:weekly"},
+			},
+			{
+				{Text: "🔥 Buy Monthly Pro", CallbackData: "buy_plan:monthly"},
+				{Text: "👑 Buy Lifetime Ultra", CallbackData: "buy_plan:lifetime"},
+			},
+		},
+	}
+
+	if len(h.cfg.AdminIDs) > 0 {
+		buttons.InlineKeyboard = append(buttons.InlineKeyboard, []gotgbot.InlineKeyboardButton{
+			{Text: "💬 Contact Owner Directly", Url: fmt.Sprintf("tg://user?id=%d", h.cfg.AdminIDs[0])},
+		})
+	}
+
+	_, err := msg.Reply(b, plansMsg, &gotgbot.SendMessageOpts{
+		ParseMode:   "HTML",
+		ReplyMarkup: buttons,
+	})
+	return err
+}
+
+// HandleBuyPlanCallback processes user clicking a plan purchase button and alerts owner
+func (h *UserHandler) HandleBuyPlanCallback(b *gotgbot.Bot, ctx *ext.Context) error {
+	cq := ctx.Update.CallbackQuery
+	if cq == nil {
+		return nil
+	}
+	data := cq.Data
+	if !strings.HasPrefix(data, "buy_plan:") {
+		return nil
+	}
+	planName := strings.TrimPrefix(data, "buy_plan:")
+	user := cq.From
+
+	_, _ = cq.Answer(b, &gotgbot.AnswerCallbackQueryOpts{
+		Text:      "✅ Request sent to owner! You will be contacted shortly.",
+		ShowAlert: true,
+	})
+
+	planCfg, ok := license.Plans[planName]
+	displayName := strings.ToUpper(planName)
+	durationDays := 30
+	if ok {
+		displayName = planCfg.Name
+		durationDays = planCfg.DurationDays
+	}
+
+	// 1. Notify User in chat
+	userMsg := fmt.Sprintf(`✅ <b>Purchase Request Submitted!</b>
+
+You selected: <b>%s</b>
+Our administrator has been notified with your User ID (<code>%d</code>).
+The owner will message you shortly with payment details and your activation key.`, displayName, user.Id)
+
+	_, _ = b.SendMessage(user.Id, userMsg, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+
+	// 2. Alert Owner / Admins with user ID, name, username, and quick action buttons
+	usernameStr := "None"
+	if user.Username != "" {
+		usernameStr = "@" + user.Username
+	}
+
+	adminAlert := fmt.Sprintf(`🔔 <b>NEW VIP PURCHASE REQUEST!</b>
+
+👤 <b>User:</b> <a href="tg://user?id=%d">%s</a>
+🏷️ <b>Username:</b> %s
+🆔 <b>User ID:</b> <code>%d</code>
+💎 <b>Requested Plan:</b> <code>%s</code> (%d days)
+📅 <b>Timestamp:</b> %s
+
+⚡ <b>Quick Actions:</b>
+• Generate Key: <code>/genkey %s %d 1</code>
+• User Profile: <code>/user %d</code>`,
+		user.Id, htmlEscape(user.FirstName), usernameStr, user.Id,
+		displayName, durationDays, time.Now().UTC().Format("02 Jan 2006, 15:04 UTC"),
+		planName, durationDays, user.Id)
+
+	adminButtons := gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
+			{
+				{Text: "💬 Message User", Url: fmt.Sprintf("tg://user?id=%d", user.Id)},
+			},
+		},
+	}
+
+	for _, adminID := range h.cfg.AdminIDs {
+		_, _ = b.SendMessage(adminID, adminAlert, &gotgbot.SendMessageOpts{
+			ParseMode:   "HTML",
+			ReplyMarkup: adminButtons,
+		})
+	}
+
+	GlobalLogBuffer.Append(fmt.Sprintf("Purchase request from user %d (%s) for plan '%s'", user.Id, usernameStr, planName))
+	return nil
+}
+
+// HandleActivateGroup handles /activategroup <KEY> in a group or /activategroup <chat_id> <KEY> in DM
+func (h *UserHandler) HandleActivateGroup(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	user := ctx.EffectiveUser
+	chat := ctx.EffectiveChat
+	args := ctx.Args()
+
+	var targetChatID int64
+	var targetTitle string
+	var rawKey string
+
+	if chat.Type == "group" || chat.Type == "supergroup" {
+		if len(args) < 2 {
+			_, err := msg.Reply(b, "ℹ️ <b>Usage in group:</b> <code>/activategroup &lt;LICENSE_KEY&gt;</code>\nExample: <code>/activategroup PREM-XXXX-XXXX-XXXX</code>", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+			return err
+		}
+		targetChatID = chat.Id
+		targetTitle = chat.Title
+		rawKey = args[1]
+	} else {
+		// DM usage: /activategroup <chat_id> <key>
+		if len(args) < 3 {
+			helpText := `ℹ️ <b>Activating Bot for a Group:</b>
+
+1. Add @` + b.Username + ` to your Telegram group.
+2. Inside that group, type:
+<code>/activategroup &lt;LICENSE_KEY&gt;</code>
+
+Or activate from here:
+<code>/activategroup &lt;group_chat_id&gt; &lt;LICENSE_KEY&gt;</code>`
+			_, err := msg.Reply(b, helpText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+			return err
+		}
+		id, err := strconv.ParseInt(args[1], 10, 64)
+		if err != nil {
+			_, err := msg.Reply(b, "❌ Invalid group chat ID.", nil)
+			return err
+		}
+		targetChatID = id
+		targetTitle = fmt.Sprintf("Group %d", id)
+		rawKey = args[2]
+	}
+
+	res, err := license.RedeemGroupKey(h.database, targetChatID, targetTitle, user.Id, rawKey)
+	if err != nil {
+		errMsg := ResolveErrorMessage(err.Error())
+		_, replyErr := msg.Reply(b, errMsg, nil)
+		return replyErr
+	}
+
+	expStr := "Permanent (Lifetime VIP)"
+	if res.ExpiresAt != nil {
+		expStr = res.ExpiresAt.Format("02 Jan 2006, 15:04 UTC")
+	}
+
+	successMsg := fmt.Sprintf(`🎉 <b>Group VIP Activated Successfully!</b>
+
+🏷️ <b>Activated Plan:</b> <code>%s</code>
+⏱️ <b>Duration:</b> %d days
+🔋 <b>Group Daily Quota:</b> %d downloads / day
+📅 <b>Valid Until:</b> %s
+👥 <b>Activated By:</b> %s
+
+All members in this group can now download videos with VIP speed and limits!`,
+		strings.ToUpper(res.Plan), res.DurationDays, res.DailyQuota, expStr, htmlEscape(user.FirstName))
+
+	_, err = msg.Reply(b, successMsg, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
 }
 
@@ -302,20 +492,34 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 		return nil // Not a media link, ignore
 	}
 
-	// Step 2: Middleware checks (Auth, Rate limit, Quota)
-	u, err := h.middleware.CheckQuota(user.Id)
-	if err != nil {
-		if err.Error() == "ERR_QUOTA_EXCEEDED" {
-			_, replyErr := msg.Reply(b, ErrQuotaExceeded, nil)
+	// Step 2: Middleware checks (Auth, Ban, Group VIP / User Quota)
+	var isGroupVIP bool
+	if ctx.EffectiveChat.Type != "private" {
+		grp, grpErr := h.middleware.CheckGroupQuota(ctx.EffectiveChat.Id)
+		if grpErr != nil && grpErr.Error() == "ERR_QUOTA_EXCEEDED" {
+			_, replyErr := msg.Reply(b, "⚠️ This group has reached its daily VIP download quota.", nil)
 			return replyErr
 		}
-		_, replyErr := msg.Reply(b, ErrInternalServer, nil)
-		return replyErr
+		if grp != nil && grp.Plan != "free" {
+			isGroupVIP = true
+		}
 	}
 
-	if u.Status == "banned" {
-		_, err := msg.Reply(b, ErrBanned, nil)
-		return err
+	if !isGroupVIP {
+		u, err := h.middleware.CheckQuota(user.Id)
+		if err != nil {
+			if err.Error() == "ERR_QUOTA_EXCEEDED" {
+				_, replyErr := msg.Reply(b, ErrQuotaExceeded, nil)
+				return replyErr
+			}
+			_, replyErr := msg.Reply(b, ErrInternalServer, nil)
+			return replyErr
+		}
+
+		if u.Status == "banned" {
+			_, err := msg.Reply(b, ErrBanned, nil)
+			return err
+		}
 	}
 
 	// Step 3: Check if already downloading
@@ -406,7 +610,11 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 	// Step 13: Finalization & Cleanup
 	_, _ = statusMsg.Delete(b, nil)
 	_ = h.database.UpdateDownloadSuccess(dbRecordID, result.Title, result.FileSize, result.Duration)
-	_ = h.database.IncrementUserDownload(user.Id)
+	if isGroupVIP {
+		_ = h.database.IncrementGroupDownload(ctx.EffectiveChat.Id)
+	} else {
+		_ = h.database.IncrementUserDownload(user.Id)
+	}
 
 	return nil
 }

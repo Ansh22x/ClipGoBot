@@ -60,6 +60,12 @@ func (j *BackgroundJobs) runExpiryChecker(ctx context.Context) {
 					_, _ = j.bot.SendMessage(uid, msg, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 				}
 			}
+
+			// Group expirations
+			expiredGroups, err := j.database.ResetExpiredGroups()
+			if err == nil && len(expiredGroups) > 0 {
+				GlobalLogBuffer.Append(fmt.Sprintf("ExpiryChecker: demoted %d expired groups to free tier", len(expiredGroups)))
+			}
 		}
 	}
 }
@@ -122,6 +128,11 @@ func (j *BackgroundJobs) runQuotaReset(ctx context.Context) {
 				GlobalLogBuffer.Append(fmt.Sprintf("QuotaReset error: %s", err.Error()))
 			} else if affected > 0 {
 				GlobalLogBuffer.Append(fmt.Sprintf("QuotaReset: reset daily quota for %d users", affected))
+			}
+
+			grpAffected, grpErr := j.database.ResetGroupDailyQuotas()
+			if grpErr == nil && grpAffected > 0 {
+				GlobalLogBuffer.Append(fmt.Sprintf("QuotaReset: reset daily quota for %d groups", grpAffected))
 			}
 		}
 	}

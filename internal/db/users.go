@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -239,4 +240,139 @@ func (db *DB) GetAllActiveUserIDs() ([]int64, error) {
 		}
 	}
 	return ids, nil
+}
+
+// GetUserByUsername finds a user record by username (case-insensitive)
+func (db *DB) GetUserByUsername(username string) (*User, error) {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if username == "" {
+		return nil, errors.New("empty username")
+	}
+
+	query := `
+	SELECT telegram_id, username, license_key, plan, status, daily_quota, daily_downloads, 
+	       last_download_at, quota_reset_at, registered_at, expires_at
+	FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1
+	`
+	row := db.QueryRow(query, username)
+
+	var u User
+	var lastDownloadStr, quotaResetStr, registeredStr, expiresStr sql.NullString
+
+	err := row.Scan(
+		&u.TelegramID,
+		&u.Username,
+		&u.LicenseKey,
+		&u.Plan,
+		&u.Status,
+		&u.DailyQuota,
+		&u.DailyDownloads,
+		&lastDownloadStr,
+		&quotaResetStr,
+		&registeredStr,
+		&expiresStr,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query user by username: %w", err)
+	}
+
+	if lastDownloadStr.Valid && lastDownloadStr.String != "" {
+		t, _ := time.Parse(time.RFC3339, lastDownloadStr.String)
+		u.LastDownloadAt = &t
+	}
+	if quotaResetStr.Valid && quotaResetStr.String != "" {
+		t, _ := time.Parse(time.RFC3339, quotaResetStr.String)
+		u.QuotaResetAt = &t
+	}
+	if registeredStr.Valid && registeredStr.String != "" {
+		t, _ := time.Parse(time.RFC3339, registeredStr.String)
+		u.RegisteredAt = t
+	}
+	if expiresStr.Valid && expiresStr.String != "" {
+		t, _ := time.Parse(time.RFC3339, expiresStr.String)
+		u.ExpiresAt = &t
+	}
+
+	return &u, nil
+}
+
+// BanUserFlexible bans a user by ID or by username
+func (db *DB) BanUserFlexible(targetID int64, username string) (*User, error) {
+	var u *User
+	var err error
+
+	if targetID != 0 {
+		u, err = db.GetUser(targetID)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			// Record user in DB as banned
+			_, _ = db.Exec(`INSERT INTO users (telegram_id, username, status) VALUES (?, ?, 'banned')`, targetID, username)
+			return db.GetUser(targetID)
+		}
+		if err := db.SetUserStatus(targetID, "banned"); err != nil {
+			return nil, err
+		}
+		u.Status = "banned"
+		return u, nil
+	}
+
+	if username != "" {
+		u, err = db.GetUserByUsername(username)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			return nil, fmt.Errorf("user with username @%s not found in bot database", username)
+		}
+		if err := db.SetUserStatus(u.TelegramID, "banned"); err != nil {
+			return nil, err
+		}
+		u.Status = "banned"
+		return u, nil
+	}
+
+	return nil, errors.New("no user ID or username specified")
+}
+
+// UnbanUserFlexible unbans a user by ID or by username
+func (db *DB) UnbanUserFlexible(targetID int64, username string) (*User, error) {
+	var u *User
+	var err error
+
+	if targetID != 0 {
+		u, err = db.GetUser(targetID)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			return nil, errors.New("user not found")
+		}
+		if err := db.SetUserStatus(targetID, "active"); err != nil {
+			return nil, err
+		}
+		u.Status = "active"
+		return u, nil
+	}
+
+	if username != "" {
+		u, err = db.GetUserByUsername(username)
+		if err != nil {
+			return nil, err
+		}
+		if u == nil {
+			return nil, fmt.Errorf("user with username @%s not found in bot database", username)
+		}
+		if err := db.SetUserStatus(u.TelegramID, "active"); err != nil {
+			return nil, err
+		}
+		u.Status = "active"
+		return u, nil
+	}
+
+	return nil, errors.New("no user ID or username specified")
 }

@@ -95,6 +95,37 @@ func (m *MiddlewareManager) CheckQuota(telegramID int64) (*db.User, error) {
 	return u, nil
 }
 
+// CheckGroupQuota verifies if group has an active VIP plan and downloads remaining today
+func (m *MiddlewareManager) CheckGroupQuota(chatID int64) (*db.Group, error) {
+	g, err := m.database.GetGroup(chatID)
+	if err != nil || g == nil {
+		return nil, nil
+	}
+
+	// Check expiration
+	if g.Plan != "free" && g.Plan != "lifetime" && g.ExpiresAt != nil {
+		if time.Now().UTC().After(*g.ExpiresAt) {
+			_ = m.database.UpdateGroupPlan(chatID, "free", "", nil, 20, 0)
+			g.Plan = "free"
+			g.DailyQuota = 20
+		}
+	}
+
+	if g.Status == "banned" {
+		return nil, fmt.Errorf("ERR_BANNED")
+	}
+
+	// Active paid group check
+	if g.Plan != "free" {
+		if g.DailyDownloads >= g.DailyQuota {
+			return g, fmt.Errorf("ERR_QUOTA_EXCEEDED")
+		}
+		return g, nil
+	}
+
+	return nil, nil
+}
+
 // RequireAdmin verifies that the invoking user is in the configured admin list
 func (m *MiddlewareManager) RequireAdmin(next func(b *gotgbot.Bot, ctx *ext.Context) error) func(b *gotgbot.Bot, ctx *ext.Context) error {
 	return func(b *gotgbot.Bot, ctx *ext.Context) error {

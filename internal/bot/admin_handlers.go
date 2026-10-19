@@ -180,80 +180,141 @@ func (h *AdminHandler) HandleListKeys(b *gotgbot.Bot, ctx *ext.Context) error {
 	return err
 }
 
-// 4. /ban <user_id> [reason]
+// 4. /ban <user_id or @username> [reason] or reply to user message
 func (h *AdminHandler) HandleBan(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	args := ctx.Args()
 
-	if len(args) < 2 {
-		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> <code>/ban &lt;user_id&gt; [reason]</code>", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	var targetID int64
+	var targetUsername string
+	var reason = "Violation of terms"
+
+	// Option A: Admin replied to a user's message
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		targetID = msg.ReplyToMessage.From.Id
+		targetUsername = msg.ReplyToMessage.From.Username
+		if len(args) >= 2 {
+			reason = strings.Join(args[1:], " ")
+		}
+	} else if len(args) >= 2 {
+		// Option B: Admin specified ID or @username
+		targetInput := strings.TrimSpace(args[1])
+		if id, err := strconv.ParseInt(targetInput, 10, 64); err == nil {
+			targetID = id
+		} else {
+			targetUsername = strings.TrimPrefix(targetInput, "@")
+		}
+		if len(args) >= 3 {
+			reason = strings.Join(args[2:], " ")
+		}
+	} else {
+		helpText := `ℹ️ <b>Usage:</b>
+• <code>/ban &lt;user_id&gt; [reason]</code>
+• <code>/ban @username [reason]</code>
+• Reply to any user message with <code>/ban [reason]</code>`
+		_, err := msg.Reply(b, helpText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 		return err
 	}
 
-	targetID, err := strconv.ParseInt(args[1], 10, 64)
+	bannedUser, err := h.database.BanUserFlexible(targetID, targetUsername)
 	if err != nil {
-		_, err := msg.Reply(b, "❌ Invalid user ID.", nil)
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Error banning user: %s", err.Error()), nil)
 		return err
 	}
 
-	reason := "Violation of terms"
-	if len(args) >= 3 {
-		reason = strings.Join(args[2:], " ")
+	// If in a group chat, also attempt to ban the member from Telegram chat
+	if ctx.EffectiveChat.Type != "private" {
+		_, _ = b.BanChatMember(ctx.EffectiveChat.Id, bannedUser.TelegramID, nil)
 	}
 
-	if err := h.database.SetUserStatus(targetID, "banned"); err != nil {
-		_, err := msg.Reply(b, fmt.Sprintf("❌ Error: %s", err.Error()), nil)
-		return err
+	usernameDisplay := "None"
+	if bannedUser.Username != "" {
+		usernameDisplay = "@" + bannedUser.Username
 	}
 
-	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d banned user %d. Reason: %s", ctx.EffectiveUser.Id, targetID, reason))
-	_, err = msg.Reply(b, fmt.Sprintf("⛔ User <code>%d</code> has been banned.\n<b>Reason:</b> %s", targetID, htmlEscape(reason)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d banned user %d (%s). Reason: %s", ctx.EffectiveUser.Id, bannedUser.TelegramID, usernameDisplay, reason))
+	replyText := fmt.Sprintf("⛔ <b>User Banned!</b>\n\n🆔 <b>ID:</b> <code>%d</code>\n👤 <b>Username:</b> %s\n📝 <b>Reason:</b> %s",
+		bannedUser.TelegramID, usernameDisplay, htmlEscape(reason))
+
+	_, err = msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
 }
 
-// 5. /unban <user_id>
+// 5. /unban <user_id or @username> or reply to user message
 func (h *AdminHandler) HandleUnban(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	args := ctx.Args()
 
-	if len(args) < 2 {
-		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> <code>/unban &lt;user_id&gt;</code>", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	var targetID int64
+	var targetUsername string
+
+	// Option A: Admin replied to a user's message
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		targetID = msg.ReplyToMessage.From.Id
+		targetUsername = msg.ReplyToMessage.From.Username
+	} else if len(args) >= 2 {
+		// Option B: Admin specified ID or @username
+		targetInput := strings.TrimSpace(args[1])
+		if id, err := strconv.ParseInt(targetInput, 10, 64); err == nil {
+			targetID = id
+		} else {
+			targetUsername = strings.TrimPrefix(targetInput, "@")
+		}
+	} else {
+		helpText := `ℹ️ <b>Usage:</b>
+• <code>/unban &lt;user_id&gt;</code>
+• <code>/unban @username</code>
+• Reply to any user message with <code>/unban</code>`
+		_, err := msg.Reply(b, helpText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 		return err
 	}
 
-	targetID, err := strconv.ParseInt(args[1], 10, 64)
+	unbannedUser, err := h.database.UnbanUserFlexible(targetID, targetUsername)
 	if err != nil {
-		_, err := msg.Reply(b, "❌ Invalid user ID.", nil)
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Error unbanning user: %s", err.Error()), nil)
 		return err
 	}
 
-	if err := h.database.SetUserStatus(targetID, "active"); err != nil {
-		_, err := msg.Reply(b, fmt.Sprintf("❌ Error: %s", err.Error()), nil)
-		return err
+	// If in a group chat, also unban the member in Telegram chat
+	if ctx.EffectiveChat.Type != "private" {
+		_, _ = b.UnbanChatMember(ctx.EffectiveChat.Id, unbannedUser.TelegramID, &gotgbot.UnbanChatMemberOpts{OnlyIfBanned: true})
 	}
 
-	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d unbanned user %d", ctx.EffectiveUser.Id, targetID))
-	_, err = msg.Reply(b, fmt.Sprintf("✅ User <code>%d</code> has been unbanned.", targetID), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	usernameDisplay := "None"
+	if unbannedUser.Username != "" {
+		usernameDisplay = "@" + unbannedUser.Username
+	}
+
+	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d unbanned user %d (%s)", ctx.EffectiveUser.Id, unbannedUser.TelegramID, usernameDisplay))
+	replyText := fmt.Sprintf("✅ <b>User Unbanned!</b>\n\n🆔 <b>ID:</b> <code>%d</code>\n👤 <b>Username:</b> %s\nStatus restored to <code>active</code>.",
+		unbannedUser.TelegramID, usernameDisplay)
+
+	_, err = msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
 }
 
-// 6. /user <user_id>
+// 6. /user <user_id or @username> or reply
 func (h *AdminHandler) HandleUser(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	args := ctx.Args()
 
-	if len(args) < 2 {
-		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> <code>/user &lt;user_id&gt;</code>", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	var usr *db.User
+	var err error
+
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		usr, err = h.database.GetUser(msg.ReplyToMessage.From.Id)
+	} else if len(args) >= 2 {
+		targetInput := strings.TrimSpace(args[1])
+		if id, parseErr := strconv.ParseInt(targetInput, 10, 64); parseErr == nil {
+			usr, err = h.database.GetUser(id)
+		} else {
+			usr, err = h.database.GetUserByUsername(targetInput)
+		}
+	} else {
+		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> <code>/user &lt;user_id or @username&gt;</code> or reply to a message", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 		return err
 	}
 
-	targetID, err := strconv.ParseInt(args[1], 10, 64)
-	if err != nil {
-		_, err := msg.Reply(b, "❌ Invalid user ID.", nil)
-		return err
-	}
-
-	usr, err := h.database.GetUser(targetID)
 	if err != nil {
 		_, err := msg.Reply(b, ErrInternalServer, nil)
 		return err
@@ -263,7 +324,7 @@ func (h *AdminHandler) HandleUser(b *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 
-	st, _ := h.database.GetUserStats(targetID)
+	st, _ := h.database.GetUserStats(usr.TelegramID)
 	totalDownloads := 0
 	if st != nil {
 		totalDownloads = st.TotalDownloads

@@ -162,3 +162,78 @@ func RedeemKey(database *db.DB, telegramID int64, rawKey string) (*RedeemResult,
 		ExpiresAt:    newExpiresAt,
 	}, nil
 }
+
+// RedeemGroupKey activates a license key for a whole Telegram group chat
+func RedeemGroupKey(database *db.DB, chatID int64, chatTitle string, activatedBy int64, rawKey string) (*RedeemResult, error) {
+	key := strings.TrimSpace(rawKey)
+	if key == "" {
+		return nil, errors.New("empty license key")
+	}
+
+	lic, err := database.GetLicenseByKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup key: %w", err)
+	}
+	if lic == nil {
+		return nil, errors.New("ERR_INVALID_KEY")
+	}
+
+	// Validate status
+	if lic.Status != "active" {
+		return nil, errors.New("ERR_KEY_EXPIRED")
+	}
+
+	if lic.ActivationCount >= lic.MaxActivations {
+		return nil, errors.New("ERR_KEY_EXPIRED")
+	}
+
+	// Get or register group
+	grp, err := database.GetOrCreateGroup(chatID, chatTitle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch group: %w", err)
+	}
+
+	planCfg, ok := Plans[lic.Plan]
+	groupQuota := 100
+	if ok {
+		groupQuota = planCfg.DailyQuota * 5
+		if groupQuota < 100 {
+			groupQuota = 100
+		}
+		if lic.Plan == "lifetime" {
+			groupQuota = 999999
+		}
+	}
+
+	// Calculate new expires_at
+	now := time.Now().UTC()
+	var newExpiresAt *time.Time
+
+	if lic.Plan == "lifetime" {
+		newExpiresAt = nil
+	} else {
+		baseTime := now
+		if grp.ExpiresAt != nil && grp.ExpiresAt.After(now) {
+			baseTime = *grp.ExpiresAt
+		}
+		computed := baseTime.AddDate(0, 0, lic.DurationDays)
+		newExpiresAt = &computed
+	}
+
+	// Update group record
+	if err := database.UpdateGroupPlan(chatID, lic.Plan, lic.Key, newExpiresAt, groupQuota, activatedBy); err != nil {
+		return nil, fmt.Errorf("failed to update group plan: %w", err)
+	}
+
+	// Increment license activations
+	if err := database.IncrementLicenseActivation(lic.Key); err != nil {
+		return nil, fmt.Errorf("failed to update license activation: %w", err)
+	}
+
+	return &RedeemResult{
+		Plan:         lic.Plan,
+		DurationDays: lic.DurationDays,
+		DailyQuota:   groupQuota,
+		ExpiresAt:    newExpiresAt,
+	}, nil
+}
