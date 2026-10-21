@@ -94,7 +94,8 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--no-warnings",
 		"--no-playlist",
 		"--skip-download",
-		"--extractor-args", "youtube:player_client=android,ios,web",
+		"--extractor-args", "youtube:player-client=tv,web",
+		"--js-runtimes", "node",
 		"--geo-bypass",
 	}
 	args = append(args, getCookieArgs()...)
@@ -103,7 +104,23 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 	cmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+		// Fallback attempt with web_embedded
+		fbArgs := []string{
+			"--dump-single-json",
+			"--no-warnings",
+			"--no-playlist",
+			"--skip-download",
+			"--extractor-args", "youtube:player-client=web_embedded,tv",
+			"--js-runtimes", "node",
+			"--geo-bypass",
+		}
+		fbArgs = append(fbArgs, getCookieArgs()...)
+		fbArgs = append(fbArgs, url)
+		fbCmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, fbArgs...)
+		output, err = fbCmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+		}
 	}
 
 	var meta MediaMetadata
@@ -161,62 +178,87 @@ func (d *Downloader) DownloadMedia(
 
 	// 5. Setup progress tracker
 	tracker := NewProgressTracker(onProgress)
-
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
 
 	// Format selector: choose best video + best audio and remux to mp4
 	formatSelector := "bestvideo+bestaudio/best"
 
-	// 6. Execute yt-dlp download with strict argument slice (prevent shell injection)
-	args := []string{
-		"--newline",
-		"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-		"-f", formatSelector,
-		"--merge-output-format", "mp4",
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--no-playlist",
-		"--extractor-args", "youtube:player_client=android,ios,web",
-		"--geo-bypass",
-		"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-		"-o", outputPattern,
+	// Define player client strategies to try
+	clientStrategies := []string{
+		"youtube:player-client=tv,web",
+		"youtube:player-client=web_embedded,tv",
+		"", // default fallback
 	}
-	args = append(args, getCookieArgs()...)
-	args = append(args, targetURL)
-
-	cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
-	}
-	cmd.Stderr = cmd.Stdout // merge stderr to capture progress or errors
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
+	if platform != PlatformYouTube {
+		clientStrategies = []string{""} // not applicable to non-YouTube
 	}
 
-	// Read progress in real-time & keep last lines for error diagnostics
+	var downloadErr error
 	var lastOutputLines []string
-	scanner := bufio.NewScanner(stdoutPipe)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if len(lastOutputLines) >= 8 {
-			lastOutputLines = lastOutputLines[1:]
-		}
-		lastOutputLines = append(lastOutputLines, line)
 
-		if info := ParseProgressLine(line); info != nil {
-			tracker.Update(info)
+	for attemptIdx, clientArg := range clientStrategies {
+		args := []string{
+			"--newline",
+			"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+			"-f", formatSelector,
+			"--merge-output-format", "mp4",
+			"--write-thumbnail",
+			"--convert-thumbnails", "jpg",
+			"--no-playlist",
+			"--geo-bypass",
+			"--js-runtimes", "node",
+			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 		}
-	}
+		if clientArg != "" {
+			args = append(args, "--extractor-args", clientArg)
+		}
+		args = append(args, getCookieArgs()...)
+		args = append(args, "-o", outputPattern, targetURL)
 
-	if err := cmd.Wait(); err != nil {
+		cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
+		stdoutPipe, pipeErr := cmd.StdoutPipe()
+		if pipeErr != nil {
+			downloadErr = pipeErr
+			continue
+		}
+		cmd.Stderr = cmd.Stdout
+
+		if startErr := cmd.Start(); startErr != nil {
+			downloadErr = startErr
+			continue
+		}
+
+		lastOutputLines = nil
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if len(lastOutputLines) >= 8 {
+				lastOutputLines = lastOutputLines[1:]
+			}
+			lastOutputLines = append(lastOutputLines, line)
+
+			if info := ParseProgressLine(line); info != nil {
+				tracker.Update(info)
+			}
+		}
+
+		waitErr := cmd.Wait()
 		if userCtx.Err() != nil {
 			return nil, errors.New("ERR_CANCELLED")
 		}
+
+		if waitErr == nil {
+			// Succeeded!
+			downloadErr = nil
+			break
+		}
+
+		downloadErr = waitErr
+		log.Printf("[yt-dlp attempt %d failed] %v (client=%s): %s", attemptIdx+1, waitErr, clientArg, strings.Join(lastOutputLines, " | "))
+	}
+
+	if downloadErr != nil {
 		errDetails := strings.Join(lastOutputLines, " | ")
-		log.Printf("[yt-dlp download error] user=%d url=%s: %s", userID, targetURL, errDetails)
 		return nil, fmt.Errorf("ERR_DOWNLOAD_FAILED: %s", errDetails)
 	}
 
