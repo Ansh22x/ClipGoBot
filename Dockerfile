@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o bot main.go
 # Stage 2: Runtime environment with Alpine, yt-dlp, FFmpeg, and Node.js
 FROM alpine:3.20
 
-# Install required system packages: FFmpeg, Node.js (for yt-dlp JS challenges), Python3, CA certificates, and curl
+# Install required system packages: FFmpeg, Node.js (for yt-dlp JS challenges), Python3, CA certificates, curl, and aria2
 RUN apk add --no-cache \
     ffmpeg \
     nodejs \
@@ -29,6 +29,7 @@ RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     curl \
+    aria2 \
     && rm -rf /var/cache/apk/*
 
 # Install the latest official yt-dlp binary
@@ -46,6 +47,10 @@ RUN mkdir -p /app/data /app/downloads
 # Copy compiled binary from builder
 COPY --from=builder /build/bot /app/bot
 
+# Copy entrypoint script for auto-updating yt-dlp on container start
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Set default environment variables
 ENV DB_PATH=/app/data/bot.db \
     DOWNLOAD_DIR=/app/downloads \
@@ -54,4 +59,5 @@ ENV DB_PATH=/app/data/bot.db \
 
 VOLUME ["/app/data", "/app/downloads"]
 
-ENTRYPOINT ["/app/bot"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/app/bot"]

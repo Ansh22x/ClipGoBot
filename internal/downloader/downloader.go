@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"tg-media-bot/internal/config"
 )
@@ -166,22 +165,16 @@ func (d *Downloader) DownloadMedia(
 		return nil, fmt.Errorf("failed to create download dir: %w", err)
 	}
 
-	// 4. Fetch metadata first to get title, duration
-	meta, err := d.FetchMetadata(userCtx, targetURL)
-	if err != nil {
-		// Non-fatal if metadata fails, will fallback during download
-		meta = &MediaMetadata{
-			ID:    fmt.Sprintf("%d_%d", userID, time.Now().UnixNano()),
-			Title: "Video",
-		}
-	}
-
-	// 5. Setup progress tracker
+	// 4. Setup progress tracker
 	tracker := NewProgressTracker(onProgress)
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
 
-	// Format selector: choose best video + best audio and remux to mp4
-	formatSelector := "bestvideo+bestaudio/best"
+	// Fast Format Selector:
+	// 1. First priority: Progressive MP4 (both audio & video combined in 1 stream).
+	//    Extremely fast for Instagram Reels, TikTok, Twitter/X, and progressive YouTube shorts (no FFmpeg remuxing needed).
+	// 2. Second priority: Best MP4 video + M4A audio merged into MP4 container.
+	// 3. Final fallback: Any best video + best audio merged into MP4.
+	formatSelector := "best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
 
 	// Define player client strategies to try
 	clientStrategies := []string{
@@ -202,6 +195,15 @@ func (d *Downloader) DownloadMedia(
 			"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
 			"-f", formatSelector,
 			"--merge-output-format", "mp4",
+			"--concurrent-fragments", "5", // Multi-threaded chunk downloader (3x-5x speedup on HLS/DASH)
+			"--buffer-size", "64K",        // High throughput memory buffer
+			"--http-chunk-size", "10M",    // Chunk streaming optimization
+			"--no-mtime",                  // Avoid filesystem timestamp latency
+			"--no-cache-dir",              // Avoid disk cache overhead
+			"--socket-timeout", "15",      // Rapid timeout & retry on stalled connections
+			"--retries", "3",
+			"--fragment-retries", "3",
+			"--write-info-json",           // Concurrently extract metadata in single pass (eliminates duplicate probe)
 			"--write-thumbnail",
 			"--convert-thumbnails", "jpg",
 			"--no-playlist",
@@ -264,7 +266,19 @@ func (d *Downloader) DownloadMedia(
 
 	tracker.Finish("⚡ <b>Download complete! Preparing to upload...</b>")
 
-	// 7. Locate final downloaded file
+	// 5. Read metadata directly from generated .info.json (Single-pass extraction)
+	var meta MediaMetadata
+	jsonPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.info.json", userID))
+	if jsonMatches, _ := filepath.Glob(jsonPattern); len(jsonMatches) > 0 {
+		if rawJSON, readErr := os.ReadFile(jsonMatches[0]); readErr == nil {
+			_ = json.Unmarshal(rawJSON, &meta)
+		}
+		for _, jm := range jsonMatches {
+			_ = os.Remove(jm)
+		}
+	}
+
+	// 6. Locate final downloaded video file
 	filePattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.mp4", userID, meta.ID))
 	matches, _ := filepath.Glob(filePattern)
 	if len(matches) == 0 {
@@ -301,7 +315,7 @@ func (d *Downloader) DownloadMedia(
 	}
 
 	// Locate thumbnail if available
-	thumbPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.jpg", userID, meta.ID))
+	thumbPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.jpg", userID))
 	thumbMatches, _ := filepath.Glob(thumbPattern)
 	var thumbPath string
 	if len(thumbMatches) > 0 {
