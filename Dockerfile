@@ -36,8 +36,11 @@ RUN apk add --no-cache \
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
 
-# Configure global yt-dlp config to enable Node.js as the JavaScript runtime for signature challenge solving
-RUN mkdir -p /etc && echo "--js-runtimes node" > /etc/yt-dlp.conf
+# Configure global yt-dlp config: enable Node.js, remote EJS components from GitHub, and IPv4
+RUN mkdir -p /etc && printf -- "--js-runtimes node\n--remote-components ejs:github\n--force-ipv4\n" > /etc/yt-dlp.conf
+
+# Install bgutil PO Token plugin for yt-dlp
+RUN pip3 install --break-system-packages --no-cache-dir bgutil-ytdlp-pot-provider || true
 
 WORKDIR /app
 

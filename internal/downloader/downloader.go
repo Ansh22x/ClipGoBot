@@ -93,7 +93,9 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--no-warnings",
 		"--no-playlist",
 		"--skip-download",
-		"--extractor-args", "youtube:player-client=tv,web",
+		"--force-ipv4",
+		"--no-check-certificates",
+		"--extractor-args", "youtube:player_client=android,web",
 		"--js-runtimes", "node",
 		"--geo-bypass",
 	}
@@ -109,7 +111,9 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--no-warnings",
 			"--no-playlist",
 			"--skip-download",
-			"--extractor-args", "youtube:player-client=web_embedded,tv",
+			"--force-ipv4",
+			"--no-check-certificates",
+			"--extractor-args", "youtube:player_client=web_embedded,android",
 			"--js-runtimes", "node",
 			"--geo-bypass",
 		}
@@ -170,16 +174,17 @@ func (d *Downloader) DownloadMedia(
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
 
 	// Fast Format Selector:
-	// 1. First priority: Progressive MP4 (both audio & video combined in 1 stream).
+	// 1. First priority: Pre-muxed single format 'b' or progressive MP4 (both audio & video combined in 1 stream).
 	//    Extremely fast for Instagram Reels, TikTok, Twitter/X, and progressive YouTube shorts (no FFmpeg remuxing needed).
 	// 2. Second priority: Best MP4 video + M4A audio merged into MP4 container.
 	// 3. Final fallback: Any best video + best audio merged into MP4.
-	formatSelector := "best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+	formatSelector := "b/best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
 
-	// Define player client strategies to try
+	// Define player client strategies to try (android first for YouTube Shorts & fast progressive streams)
 	clientStrategies := []string{
-		"youtube:player-client=tv,web",
-		"youtube:player-client=web_embedded,tv",
+		"youtube:player_client=android,web",
+		"youtube:player_client=web,mweb",
+		"youtube:player_client=web_embedded,android",
 		"", // default fallback
 	}
 	if platform != PlatformYouTube {
@@ -195,6 +200,9 @@ func (d *Downloader) DownloadMedia(
 			"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
 			"-f", formatSelector,
 			"--merge-output-format", "mp4",
+			"--force-ipv4",                // Critical: prevents datacenter shared IPv6 429 blocks
+			"--no-check-certificates",
+			"--add-header", "Accept-Language: en-US,en;q=0.9",
 			"--concurrent-fragments", "5", // Multi-threaded chunk downloader (3x-5x speedup on HLS/DASH)
 			"--buffer-size", "64K",        // High throughput memory buffer
 			"--http-chunk-size", "10M",    // Chunk streaming optimization

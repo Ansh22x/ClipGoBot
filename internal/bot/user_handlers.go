@@ -599,9 +599,10 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 		htmlEscape(result.Title), result.Platform, formatDuration(result.Duration), b.Username)
 
 	sendVideoOpts := &gotgbot.SendVideoOpts{
-		Caption:   caption,
-		ParseMode: "HTML",
-		Duration:  int64(result.Duration),
+		Caption:           caption,
+		ParseMode:         "HTML",
+		Duration:          int64(result.Duration),
+		SupportsStreaming: true,
 	}
 
 	// Attach thumbnail if present
