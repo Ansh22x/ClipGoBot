@@ -2,6 +2,10 @@ package bot
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -497,5 +501,158 @@ func (h *AdminHandler) HandleLogs(b *gotgbot.Bot, ctx *ext.Context) error {
 		len(lines), htmlEscape(strings.Join(lines, "\n")))
 
 	_, err := msg.Reply(b, logText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+// 11. /backup: Send database file to Admin
+func (h *AdminHandler) HandleBackup(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	file, err := os.Open(h.cfg.DBPath)
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to open database file: %s", err.Error()), nil)
+		return err
+	}
+	defer file.Close()
+
+	caption := fmt.Sprintf("💾 <b>Database Backup</b>\n📅 <i>Generated on %s</i>\n\nTo restore this backup at any time, reply to this file with <code>/restore</code>.",
+		time.Now().UTC().Format("02 Jan 2006 15:04:05 UTC"))
+
+	_, err = b.SendDocument(ctx.EffectiveChat.Id, gotgbot.InputFileByReader("bot.db", file), &gotgbot.SendDocumentOpts{
+		Caption:   caption,
+		ParseMode: "HTML",
+	})
+	return err
+}
+
+// 12. /restore: Restore database from document reply
+func (h *AdminHandler) HandleRestore(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+
+	var targetDoc *gotgbot.Document
+	if msg.Document != nil {
+		targetDoc = msg.Document
+	} else if msg.ReplyToMessage != nil && msg.ReplyToMessage.Document != nil {
+		targetDoc = msg.ReplyToMessage.Document
+	}
+
+	if targetDoc == nil {
+		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> Send your <code>bot.db</code> file or reply to a backup with <code>/restore</code>.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	tgFile, err := b.GetFile(targetDoc.FileId, nil)
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to fetch file from Telegram: %s", err.Error()), nil)
+		return err
+	}
+
+	resp, err := http.Get(tgFile.URL(b, nil))
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to download backup: %s", err.Error()), nil)
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Backup existing db first if it exists
+	if _, err := os.Stat(h.cfg.DBPath); err == nil {
+		_ = os.Rename(h.cfg.DBPath, h.cfg.DBPath+".bak")
+	}
+
+	_ = os.MkdirAll(filepath.Dir(h.cfg.DBPath), 0755)
+	out, err := os.Create(h.cfg.DBPath)
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to create database file: %s", err.Error()), nil)
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to write database: %s", err.Error()), nil)
+		return err
+	}
+
+	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d restored database from backup file", ctx.EffectiveUser.Id))
+	_, err = msg.Reply(b, "✅ <b>Database restored successfully!</b>\nAll users, license keys, and quotas have been recovered.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+// 13. /setcookies: Save cookies.txt from document
+func (h *AdminHandler) HandleSetCookies(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+
+	var targetDoc *gotgbot.Document
+	if msg.Document != nil {
+		targetDoc = msg.Document
+	} else if msg.ReplyToMessage != nil && msg.ReplyToMessage.Document != nil {
+		targetDoc = msg.ReplyToMessage.Document
+	}
+
+	if targetDoc == nil {
+		_, err := msg.Reply(b, "ℹ️ <b>Usage:</b> Send your <code>cookies.txt</code> file or reply to it with <code>/setcookies</code>.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	tgFile, err := b.GetFile(targetDoc.FileId, nil)
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to fetch file: %s", err.Error()), nil)
+		return err
+	}
+
+	resp, err := http.Get(tgFile.URL(b, nil))
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to download cookies: %s", err.Error()), nil)
+		return err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		_, err := msg.Reply(b, fmt.Sprintf("❌ Failed to read cookies: %s", err.Error()), nil)
+		return err
+	}
+
+	targets := []string{
+		"cookies.txt",
+		"data/cookies.txt",
+		"/app/data/cookies.txt",
+	}
+	for _, t := range targets {
+		_ = os.MkdirAll(filepath.Dir(t), 0755)
+		_ = os.WriteFile(t, data, 0644)
+	}
+
+	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d installed new cookies.txt (%d bytes)", ctx.EffectiveUser.Id, len(data)))
+	_, err = msg.Reply(b, fmt.Sprintf("✅ <b>Cookies installed successfully!</b>\nSaved %d bytes. YouTube downloads will now use this authenticated session to bypass 429 rate limits.", len(data)), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+// 14. /checkcookies: Check cookies status
+func (h *AdminHandler) HandleCheckCookies(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	targets := []string{"cookies.txt", "data/cookies.txt", "/app/data/cookies.txt"}
+	var foundPath string
+	var size int64
+	for _, t := range targets {
+		if fi, err := os.Stat(t); err == nil && fi.Size() > 0 {
+			foundPath = t
+			size = fi.Size()
+			break
+		}
+	}
+
+	if foundPath == "" {
+		replyText := `❌ <b>No cookies.txt installed!</b>
+
+To fix YouTube 429 Rate Limits:
+1. Export cookies from a free dummy Google/YouTube account using a browser extension (like "Get cookies.txt LOCALLY").
+2. Send the <code>cookies.txt</code> file here with caption <code>/setcookies</code>.
+3. Or in Render dashboard, add environment variable:
+   <code>COOKIES_DATA</code> = &lt;paste content of cookies.txt&gt;`
+		_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	replyText := fmt.Sprintf("🍪 <b>Cookies Status: Active</b>\n\n📁 <b>Location:</b> <code>%s</code>\n📏 <b>Size:</b> %d bytes\n⚡ YouTube requests are authenticated to bypass 429 blocks.", foundPath, size)
+	_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
 }

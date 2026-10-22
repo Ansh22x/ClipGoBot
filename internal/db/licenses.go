@@ -60,10 +60,11 @@ func (db *DB) GetLicenseByKey(key string) (*License, error) {
 		return nil, fmt.Errorf("failed to query license: %w", err)
 	}
 
-	lic.CreatedAt, _ = time.Parse(time.RFC3339, createdAtStr)
-	if expiresAtStr.Valid && expiresAtStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, expiresAtStr.String)
-		lic.ExpiresAt = &t
+	if t := ParseFlexibleTime(createdAtStr); t != nil {
+		lic.CreatedAt = *t
+	}
+	if expiresAtStr.Valid {
+		lic.ExpiresAt = ParseFlexibleTime(expiresAtStr.String)
 	}
 
 	return &lic, nil

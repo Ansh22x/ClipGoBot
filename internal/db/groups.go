@@ -85,21 +85,19 @@ func (db *DB) GetGroup(chatID int64) (*Group, error) {
 		return nil, fmt.Errorf("failed to query group: %w", err)
 	}
 
-	if lastDownloadStr.Valid && lastDownloadStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, lastDownloadStr.String)
-		g.LastDownloadAt = &t
+	if lastDownloadStr.Valid {
+		g.LastDownloadAt = ParseFlexibleTime(lastDownloadStr.String)
 	}
-	if quotaResetStr.Valid && quotaResetStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, quotaResetStr.String)
-		g.QuotaResetAt = &t
+	if quotaResetStr.Valid {
+		g.QuotaResetAt = ParseFlexibleTime(quotaResetStr.String)
 	}
-	if expiresStr.Valid && expiresStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, expiresStr.String)
-		g.ExpiresAt = &t
+	if expiresStr.Valid {
+		g.ExpiresAt = ParseFlexibleTime(expiresStr.String)
 	}
-	if registeredStr.Valid && registeredStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, registeredStr.String)
-		g.RegisteredAt = t
+	if registeredStr.Valid {
+		if t := ParseFlexibleTime(registeredStr.String); t != nil {
+			g.RegisteredAt = *t
+		}
 	}
 
 	return &g, nil
@@ -139,7 +137,7 @@ func (db *DB) ResetExpiredGroups() ([]int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	querySelect := `
 	SELECT chat_id FROM groups 
-	WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND expires_at <= ?
+	WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)
 	`
 	rows, err := db.Query(querySelect, now)
 	if err != nil {
@@ -159,7 +157,7 @@ func (db *DB) ResetExpiredGroups() ([]int64, error) {
 		queryUpdate := `
 		UPDATE groups 
 		SET plan = 'free', license_key = NULL, expires_at = NULL, daily_quota = 20 
-		WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND expires_at <= ?
+		WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)
 		`
 		_, err = db.Exec(queryUpdate, now)
 		if err != nil {

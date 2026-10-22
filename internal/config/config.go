@@ -21,6 +21,7 @@ type Config struct {
 	YtDlpPath              string
 	FFmpegPath             string
 	LogLevel               string
+	ProxyURL               string
 	adminMap               map[int64]struct{}
 	mu                     sync.RWMutex
 }
@@ -41,6 +42,7 @@ func LoadConfig() (*Config, error) {
 	ytDlpPath := getEnv("YTDLP_PATH", "yt-dlp")
 	ffmpegPath := getEnv("FFMPEG_PATH", "ffmpeg")
 	logLevel := getEnv("LOG_LEVEL", "INFO")
+	proxyURL := getEnv("YTDLP_PROXY", getEnv("PROXY", getEnv("HTTP_PROXY", "")))
 
 	adminIDs := parseAdminIDs(adminIDsStr)
 	adminMap := make(map[int64]struct{}, len(adminIDs))
@@ -60,6 +62,7 @@ func LoadConfig() (*Config, error) {
 		YtDlpPath:              ytDlpPath,
 		FFmpegPath:             ffmpegPath,
 		LogLevel:               logLevel,
+		ProxyURL:               proxyURL,
 		adminMap:               adminMap,
 	}
 

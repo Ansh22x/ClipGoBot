@@ -86,21 +86,19 @@ func (db *DB) GetUser(telegramID int64) (*User, error) {
 		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
 
-	if lastDownloadStr.Valid && lastDownloadStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, lastDownloadStr.String)
-		u.LastDownloadAt = &t
+	if lastDownloadStr.Valid {
+		u.LastDownloadAt = ParseFlexibleTime(lastDownloadStr.String)
 	}
-	if quotaResetStr.Valid && quotaResetStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, quotaResetStr.String)
-		u.QuotaResetAt = &t
+	if quotaResetStr.Valid {
+		u.QuotaResetAt = ParseFlexibleTime(quotaResetStr.String)
 	}
-	if registeredStr.Valid && registeredStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, registeredStr.String)
-		u.RegisteredAt = t
+	if registeredStr.Valid {
+		if t := ParseFlexibleTime(registeredStr.String); t != nil {
+			u.RegisteredAt = *t
+		}
 	}
-	if expiresStr.Valid && expiresStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, expiresStr.String)
-		u.ExpiresAt = &t
+	if expiresStr.Valid {
+		u.ExpiresAt = ParseFlexibleTime(expiresStr.String)
 	}
 
 	return &u, nil
@@ -174,7 +172,7 @@ func (db *DB) ResetExpiredUsers() ([]int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	querySelect := `
 	SELECT telegram_id FROM users 
-	WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND expires_at <= ?
+	WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)
 	`
 	rows, err := db.Query(querySelect, now)
 	if err != nil {
@@ -194,7 +192,7 @@ func (db *DB) ResetExpiredUsers() ([]int64, error) {
 		queryUpdate := `
 		UPDATE users 
 		SET plan = 'free', license_key = NULL, expires_at = NULL, daily_quota = 5 
-		WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND expires_at <= ?
+		WHERE plan != 'free' AND plan != 'lifetime' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)
 		`
 		_, err = db.Exec(queryUpdate, now)
 		if err != nil {
@@ -279,21 +277,19 @@ func (db *DB) GetUserByUsername(username string) (*User, error) {
 		return nil, fmt.Errorf("failed to query user by username: %w", err)
 	}
 
-	if lastDownloadStr.Valid && lastDownloadStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, lastDownloadStr.String)
-		u.LastDownloadAt = &t
+	if lastDownloadStr.Valid {
+		u.LastDownloadAt = ParseFlexibleTime(lastDownloadStr.String)
 	}
-	if quotaResetStr.Valid && quotaResetStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, quotaResetStr.String)
-		u.QuotaResetAt = &t
+	if quotaResetStr.Valid {
+		u.QuotaResetAt = ParseFlexibleTime(quotaResetStr.String)
 	}
-	if registeredStr.Valid && registeredStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, registeredStr.String)
-		u.RegisteredAt = t
+	if registeredStr.Valid {
+		if t := ParseFlexibleTime(registeredStr.String); t != nil {
+			u.RegisteredAt = *t
+		}
 	}
-	if expiresStr.Valid && expiresStr.String != "" {
-		t, _ := time.Parse(time.RFC3339, expiresStr.String)
-		u.ExpiresAt = &t
+	if expiresStr.Valid {
+		u.ExpiresAt = ParseFlexibleTime(expiresStr.String)
 	}
 
 	return &u, nil

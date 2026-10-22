@@ -107,6 +107,10 @@ func (e *BotEngine) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("stats_admin", mw.RequireAdmin(adminH.HandleStatsAdmin)))
 	d.AddHandler(handlers.NewCommand("system", mw.RequireAdmin(adminH.HandleStatsAdmin)))
 	d.AddHandler(handlers.NewCommand("logs", mw.RequireAdmin(adminH.HandleLogs)))
+	d.AddHandler(handlers.NewCommand("backup", mw.RequireAdmin(adminH.HandleBackup)))
+	d.AddHandler(handlers.NewCommand("restore", mw.RequireAdmin(adminH.HandleRestore)))
+	d.AddHandler(handlers.NewCommand("setcookies", mw.RequireAdmin(adminH.HandleSetCookies)))
+	d.AddHandler(handlers.NewCommand("checkcookies", mw.RequireAdmin(adminH.HandleCheckCookies)))
 
 	// Raw link detection handler (matches text messages that are not commands)
 	d.AddHandler(handlers.NewMessage(message.Text, mw.AuthAndRateLimit(func(b *gotgbot.Bot, ctx *ext.Context) error {
@@ -144,6 +148,10 @@ func (e *BotEngine) registerTelegramCommands() {
 		{Command: "broadcast", Description: "[Admin] Broadcast message to all users"},
 		{Command: "stats_admin", Description: "[Admin] View system analytics & memory"},
 		{Command: "logs", Description: "[Admin] View recent server logs"},
+		{Command: "backup", Description: "[Admin] Download full database backup"},
+		{Command: "restore", Description: "[Admin] Restore database from backup file"},
+		{Command: "setcookies", Description: "[Admin] Install cookies.txt for YouTube"},
+		{Command: "checkcookies", Description: "[Admin] Check active cookies.txt status"},
 	}...)
 	_, _ = e.bot.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
 		Scope: gotgbot.BotCommandScopeAllChatAdministrators{},

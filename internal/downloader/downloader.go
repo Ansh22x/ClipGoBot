@@ -72,13 +72,24 @@ func (d *Downloader) CancelUserDownload(userID int64) bool {
 }
 
 func getCookieArgs() []string {
+	// Auto-populate cookies file if COOKIES_DATA env variable is provided
+	if raw := os.Getenv("COOKIES_DATA"); strings.TrimSpace(raw) != "" {
+		for _, target := range []string{"data/cookies.txt", "/app/data/cookies.txt"} {
+			if _, err := os.Stat(target); os.IsNotExist(err) {
+				_ = os.MkdirAll(filepath.Dir(target), 0755)
+				_ = os.WriteFile(target, []byte(raw), 0644)
+				break
+			}
+		}
+	}
+
 	cookieLocations := []string{
 		"cookies.txt",
 		"data/cookies.txt",
 		"/app/data/cookies.txt",
 	}
 	for _, p := range cookieLocations {
-		if _, err := os.Stat(p); err == nil {
+		if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
 			return []string{"--cookies", p}
 		}
 	}
@@ -95,9 +106,12 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--skip-download",
 		"--force-ipv4",
 		"--no-check-certificates",
-		"--extractor-args", "youtube:player_client=android,web",
+		"--extractor-args", "youtube:player_client=android,mweb",
 		"--js-runtimes", "node",
 		"--geo-bypass",
+	}
+	if d.cfg.ProxyURL != "" {
+		args = append(args, "--proxy", d.cfg.ProxyURL)
 	}
 	args = append(args, getCookieArgs()...)
 	args = append(args, url)
@@ -116,6 +130,9 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--extractor-args", "youtube:player_client=web_embedded,android",
 			"--js-runtimes", "node",
 			"--geo-bypass",
+		}
+		if d.cfg.ProxyURL != "" {
+			fbArgs = append(fbArgs, "--proxy", d.cfg.ProxyURL)
 		}
 		fbArgs = append(fbArgs, getCookieArgs()...)
 		fbArgs = append(fbArgs, url)
@@ -180,10 +197,11 @@ func (d *Downloader) DownloadMedia(
 	// 3. Final fallback: Any best video + best audio merged into MP4.
 	formatSelector := "b/best[ext=mp4][vcodec!=none][acodec!=none]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
 
-	// Define player client strategies to try (android first for YouTube Shorts & fast progressive streams)
+	// Define player client strategies to try (android/mweb first for bypass of 429 & fast progressive streams)
 	clientStrategies := []string{
-		"youtube:player_client=android,web",
+		"youtube:player_client=android,mweb",
 		"youtube:player_client=web,mweb",
+		"youtube:player_client=ios,android",
 		"youtube:player_client=web_embedded,android",
 		"", // default fallback
 	}
@@ -218,6 +236,9 @@ func (d *Downloader) DownloadMedia(
 			"--geo-bypass",
 			"--js-runtimes", "node",
 			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+		}
+		if d.cfg.ProxyURL != "" {
+			args = append(args, "--proxy", d.cfg.ProxyURL)
 		}
 		if clientArg != "" {
 			args = append(args, "--extractor-args", clientArg)

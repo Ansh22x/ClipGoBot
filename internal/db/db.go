@@ -5,9 +5,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// ParseFlexibleTime safely parses timestamps stored in diverse SQLite formats without returning zero dates
+func ParseFlexibleTime(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	formats := []string{
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			utc := t.UTC()
+			return &utc
+		}
+	}
+	return nil
+}
 
 // DB wraps standard database/sql DB instance
 type DB struct {
