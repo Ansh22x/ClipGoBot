@@ -656,3 +656,87 @@ To fix YouTube 429 Rate Limits:
 	_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
 	return err
 }
+
+// 15. /setproxy: Configure a network proxy for yt-dlp downloads
+func (h *AdminHandler) HandleSetProxy(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	args := ctx.Args()
+
+	if len(args) < 2 {
+		helpText := `ℹ️ <b>Proxy Configuration:</b>
+
+<b>Usage:</b> <code>/setproxy &lt;PROXY_URL&gt;</code>
+<b>Disable:</b> <code>/setproxy off</code>
+
+<b>Supported Formats:</b>
+• <code>http://username:password@ip:port</code>
+• <code>https://username:password@ip:port</code>
+• <code>socks5://username:password@ip:port</code>
+• <code>socks5h://username:password@ip:port</code>
+
+<i>Example:</i> <code>/setproxy http://user123:pass456@185.199.229.15:8080</code>`
+		_, err := msg.Reply(b, helpText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	proxyInput := strings.TrimSpace(args[1])
+	if strings.EqualFold(proxyInput, "off") || strings.EqualFold(proxyInput, "none") || strings.EqualFold(proxyInput, "clear") || strings.EqualFold(proxyInput, "disable") {
+		h.cfg.SetProxyURL("")
+		GlobalLogBuffer.Append(fmt.Sprintf("Admin %d disabled proxy", ctx.EffectiveUser.Id))
+		_, err := msg.Reply(b, "✅ <b>Proxy disabled!</b>\nDownloads will now use direct server network.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	lower := strings.ToLower(proxyInput)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") &&
+		!strings.HasPrefix(lower, "socks5://") && !strings.HasPrefix(lower, "socks5h://") &&
+		!strings.HasPrefix(lower, "socks4://") {
+		_, err := msg.Reply(b, "❌ <b>Invalid proxy scheme.</b>\nMust begin with <code>http://</code>, <code>https://</code>, <code>socks5://</code>, or <code>socks5h://</code>.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	h.cfg.SetProxyURL(proxyInput)
+	GlobalLogBuffer.Append(fmt.Sprintf("Admin %d configured proxy: %s", ctx.EffectiveUser.Id, maskProxy(proxyInput)))
+
+	replyText := fmt.Sprintf("✅ <b>Proxy updated successfully!</b>\n\n🌐 <b>Active Proxy:</b> <code>%s</code>\n⚡ All media downloads will now route through this proxy to prevent IP rate-limits.", htmlEscape(maskProxy(proxyInput)))
+	_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+// 16. /checkproxy: Shows current proxy status
+func (h *AdminHandler) HandleCheckProxy(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	currentProxy := h.cfg.GetProxyURL()
+
+	if currentProxy == "" {
+		replyText := `🌐 <b>Proxy Status: Disabled (Direct Connection)</b>
+
+To enable a proxy:
+<code>/setproxy http://username:password@ip:port</code>
+or set <code>YTDLP_PROXY</code> in your <code>.env</code> file.`
+		_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+
+	replyText := fmt.Sprintf(`🌐 <b>Proxy Status: ACTIVE</b>
+
+🛰️ <b>Configured Proxy:</b> <code>%s</code>
+⚡ Media downloads are routing through this proxy.
+To disable, send <code>/setproxy off</code>.`, htmlEscape(maskProxy(currentProxy)))
+
+	_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+func maskProxy(p string) string {
+	if !strings.Contains(p, "@") {
+		return p
+	}
+	parts := strings.SplitN(p, "@", 2)
+	prefix := parts[0]
+	host := parts[1]
+	if colonIdx := strings.LastIndex(prefix, ":"); colonIdx != -1 {
+		return prefix[:colonIdx+1] + "****@" + host
+	}
+	return prefix + "@" + host
+}

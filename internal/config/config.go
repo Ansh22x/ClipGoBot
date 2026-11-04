@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -75,6 +76,50 @@ func (c *Config) IsAdmin(userID int64) bool {
 	defer c.mu.RUnlock()
 	_, ok := c.adminMap[userID]
 	return ok
+}
+
+// GetProxyURL thread-safely returns the current proxy URL
+func (c *Config) GetProxyURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ProxyURL
+}
+
+// SetProxyURL thread-safely updates the proxy URL and persists to .env
+func (c *Config) SetProxyURL(proxy string) {
+	c.mu.Lock()
+	c.ProxyURL = strings.TrimSpace(proxy)
+	c.mu.Unlock()
+
+	updateEnvVar(".env", "YTDLP_PROXY", c.ProxyURL)
+}
+
+func updateEnvVar(envPath, key, val string) {
+	lines := []string{}
+	found := false
+
+	if file, err := os.Open(envPath); err == nil {
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, key+"=") {
+				if val != "" {
+					lines = append(lines, fmt.Sprintf("%s=%s", key, val))
+				}
+				found = true
+			} else {
+				lines = append(lines, line)
+			}
+		}
+		file.Close()
+	}
+
+	if !found && val != "" {
+		lines = append(lines, fmt.Sprintf("%s=%s", key, val))
+	}
+
+	_ = os.WriteFile(envPath, []byte(strings.Join(lines, "\n")+"\n"), 0644)
 }
 
 func parseAdminIDs(s string) []int64 {

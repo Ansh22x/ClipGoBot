@@ -111,14 +111,25 @@ func (e *BotEngine) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("restore", mw.RequireAdmin(adminH.HandleRestore)))
 	d.AddHandler(handlers.NewCommand("setcookies", mw.RequireAdmin(adminH.HandleSetCookies)))
 	d.AddHandler(handlers.NewCommand("checkcookies", mw.RequireAdmin(adminH.HandleCheckCookies)))
+	d.AddHandler(handlers.NewCommand("setproxy", mw.RequireAdmin(adminH.HandleSetProxy)))
+	d.AddHandler(handlers.NewCommand("checkproxy", mw.RequireAdmin(adminH.HandleCheckProxy)))
 
-	// Raw link detection handler (matches text messages that are not commands)
-	d.AddHandler(handlers.NewMessage(message.Text, mw.AuthAndRateLimit(func(b *gotgbot.Bot, ctx *ext.Context) error {
-		if strings.HasPrefix(ctx.EffectiveMessage.Text, "/") {
+	// Raw link detection handler (ONLY processes text messages containing a valid supported media link)
+	d.AddHandler(handlers.NewMessage(message.Text, func(b *gotgbot.Bot, ctx *ext.Context) error {
+		msg := ctx.EffectiveMessage
+		if msg == nil || strings.HasPrefix(msg.Text, "/") {
 			return nil // Let command handlers process commands
 		}
-		return userH.HandleRawLink(b, ctx)
-	})))
+
+		// Strictly ignore messages that do not contain a supported media link
+		// Prevents replying to unnecessary chatter, greetings, or normal group discussions
+		if downloader.DetectLink(msg.Text) == nil {
+			return nil
+		}
+
+		// Only apply Auth & RateLimit middleware to valid media download requests
+		return mw.AuthAndRateLimit(userH.HandleRawLink)(b, ctx)
+	}))
 }
 
 func (e *BotEngine) registerTelegramCommands() {
@@ -152,6 +163,8 @@ func (e *BotEngine) registerTelegramCommands() {
 		{Command: "restore", Description: "[Admin] Restore database from backup file"},
 		{Command: "setcookies", Description: "[Admin] Install cookies.txt for YouTube"},
 		{Command: "checkcookies", Description: "[Admin] Check active cookies.txt status"},
+		{Command: "setproxy", Description: "[Admin] Configure download proxy URL"},
+		{Command: "checkproxy", Description: "[Admin] Check active proxy status"},
 	}...)
 	_, _ = e.bot.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
 		Scope: gotgbot.BotCommandScopeAllChatAdministrators{},

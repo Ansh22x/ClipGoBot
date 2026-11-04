@@ -110,8 +110,8 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--js-runtimes", "node",
 		"--geo-bypass",
 	}
-	if d.cfg.ProxyURL != "" {
-		args = append(args, "--proxy", d.cfg.ProxyURL)
+	if proxy := d.cfg.GetProxyURL(); proxy != "" {
+		args = append(args, "--proxy", proxy)
 	}
 	args = append(args, getCookieArgs()...)
 	args = append(args, url)
@@ -131,8 +131,8 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--js-runtimes", "node",
 			"--geo-bypass",
 		}
-		if d.cfg.ProxyURL != "" {
-			fbArgs = append(fbArgs, "--proxy", d.cfg.ProxyURL)
+		if proxy := d.cfg.GetProxyURL(); proxy != "" {
+			fbArgs = append(fbArgs, "--proxy", proxy)
 		}
 		fbArgs = append(fbArgs, getCookieArgs()...)
 		fbArgs = append(fbArgs, url)
@@ -237,8 +237,8 @@ func (d *Downloader) DownloadMedia(
 			"--js-runtimes", "node",
 			"--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 		}
-		if d.cfg.ProxyURL != "" {
-			args = append(args, "--proxy", d.cfg.ProxyURL)
+		if proxy := d.cfg.GetProxyURL(); proxy != "" {
+			args = append(args, "--proxy", proxy)
 		}
 		if clientArg != "" {
 			args = append(args, "--extractor-args", clientArg)
