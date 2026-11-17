@@ -12,8 +12,8 @@ fi
 
 # Keep yt-dlp updated on container startup to fix platform breakages
 if [ -z "$NO_UPDATE_YTDLP" ]; then
-    echo "Checking and updating yt-dlp to latest upstream release..."
-    yt-dlp -U || echo "yt-dlp already at latest or update skipped."
+    echo "Checking and updating yt-dlp with curl-cffi..."
+    pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" || echo "yt-dlp already at latest or update skipped."
 fi
 
 exec "$@"

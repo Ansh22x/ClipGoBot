@@ -1,9 +1,15 @@
 package bot
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -587,37 +593,51 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 	// Step 12: Send video to Telegram
 	_, _, _ = statusMsg.EditText(b, "📤 <b>Uploading video to Telegram...</b>", &gotgbot.EditMessageTextOpts{ParseMode: "HTML"})
 
-	videoFile, err := os.Open(result.FilePath)
-	if err != nil {
-		_, _, _ = statusMsg.EditText(b, ErrDownloadFailed, nil)
-		_ = h.database.UpdateDownloadFailed(dbRecordID, "failed to open downloaded file")
-		return nil
-	}
-	defer videoFile.Close()
-
 	caption := fmt.Sprintf("🎬 <b>%s</b>\n\n🌐 <b>Platform:</b> %s\n⏱️ <b>Duration:</b> %s\n⚡ <i>Downloaded via @%s</i>",
 		htmlEscape(result.Title), result.Platform, formatDuration(result.Duration), b.Username)
 
-	sendVideoOpts := &gotgbot.SendVideoOpts{
-		Caption:           caption,
-		ParseMode:         "HTML",
-		Duration:          int64(result.Duration),
-		SupportsStreaming: true,
-	}
-
-	// Attach thumbnail if present
-	if result.ThumbnailPath != "" {
-		if thumbFile, err := os.Open(result.ThumbnailPath); err == nil {
-			defer thumbFile.Close()
-			sendVideoOpts.Thumbnail = gotgbot.InputFileByReader("thumb.jpg", thumbFile)
+	// If using local Telegram Bot API server, attempt zero-copy local upload first
+	isLocalAPI := h.cfg.TelegramAPIBase != "" && !strings.Contains(h.cfg.TelegramAPIBase, "api.telegram.org")
+	var sendErr error
+	if isLocalAPI {
+		sendErr = h.sendVideoLocal(ctx.EffectiveChat.Id, result, caption)
+		if sendErr != nil {
+			log.Printf("[Upload] Local direct send failed (%v), falling back to multipart streaming", sendErr)
 		}
 	}
 
-	_, err = b.SendVideo(ctx.EffectiveChat.Id, gotgbot.InputFileByReader("video.mp4", videoFile), sendVideoOpts)
-	if err != nil {
-		_, _, _ = statusMsg.EditText(b, ErrDownloadFailed, nil)
-		_ = h.database.UpdateDownloadFailed(dbRecordID, err.Error())
-		return nil
+	if !isLocalAPI || sendErr != nil {
+		videoFile, err := os.Open(result.FilePath)
+		if err != nil {
+			_, _, _ = statusMsg.EditText(b, ErrDownloadFailed, nil)
+			_ = h.database.UpdateDownloadFailed(dbRecordID, "failed to open downloaded file")
+			return nil
+		}
+		defer videoFile.Close()
+
+		sendVideoOpts := &gotgbot.SendVideoOpts{
+			Caption:           caption,
+			ParseMode:         "HTML",
+			Duration:          int64(result.Duration),
+			Width:             int64(result.Width),
+			Height:            int64(result.Height),
+			SupportsStreaming: true,
+		}
+
+		// Attach thumbnail if present
+		if result.ThumbnailPath != "" {
+			if thumbFile, err := os.Open(result.ThumbnailPath); err == nil {
+				defer thumbFile.Close()
+				sendVideoOpts.Thumbnail = gotgbot.InputFileByReader("thumb.jpg", thumbFile)
+			}
+		}
+
+		_, err = b.SendVideo(ctx.EffectiveChat.Id, gotgbot.InputFileByReader("video.mp4", videoFile), sendVideoOpts)
+		if err != nil {
+			_, _, _ = statusMsg.EditText(b, ErrDownloadFailed, nil)
+			_ = h.database.UpdateDownloadFailed(dbRecordID, err.Error())
+			return nil
+		}
 	}
 
 	// Step 13: Finalization & Cleanup
@@ -651,4 +671,66 @@ func formatDuration(seconds int) string {
 		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%02d:%02d", m, s)
+}
+
+// sendVideoLocal sends video directly via local Telegram Bot API server by local file path
+func (h *UserHandler) sendVideoLocal(chatID int64, result *downloader.DownloadResult, caption string) error {
+	absPath, err := filepath.Abs(result.FilePath)
+	if err != nil {
+		absPath = result.FilePath
+	}
+
+	payload := map[string]any{
+		"chat_id":            chatID,
+		"video":              absPath,
+		"caption":            caption,
+		"parse_mode":         "HTML",
+		"duration":           result.Duration,
+		"supports_streaming": true,
+	}
+	if result.Width > 0 && result.Height > 0 {
+		payload["width"] = result.Width
+		payload["height"] = result.Height
+	}
+	if result.ThumbnailPath != "" {
+		if absThumb, err := filepath.Abs(result.ThumbnailPath); err == nil {
+			payload["thumbnail"] = absThumb
+		}
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	apiURL := strings.TrimRight(h.cfg.TelegramAPIBase, "/")
+	endpoint := fmt.Sprintf("%s/bot%s/sendVideo", apiURL, h.cfg.BotToken)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	var r struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return err
+	}
+	if !r.OK {
+		return errors.New(r.Description)
+	}
+	return nil
 }

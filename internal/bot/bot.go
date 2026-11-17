@@ -35,13 +35,20 @@ func NewBotEngine(cfg *config.Config, database *db.DB) (*BotEngine, error) {
 		return nil, fmt.Errorf("BOT_TOKEN is required but was not provided")
 	}
 
+	apiURL := strings.TrimRight(cfg.TelegramAPIBase, "/")
+	if apiURL == "" {
+		apiURL = "https://api.telegram.org"
+	}
+	log.Printf("[Bot Init] Using Telegram API Endpoint: %s", apiURL)
+
 	b, err := gotgbot.NewBot(cfg.BotToken, &gotgbot.BotOpts{
 		BotClient: &gotgbot.BaseBotClient{
 			Client: http.Client{
-				Timeout: 120 * time.Second, // Long timeout for large file uploads
+				Timeout: 30 * time.Minute, // Long timeout for large file uploads (up to 2GB)
 			},
 			DefaultRequestOpts: &gotgbot.RequestOpts{
-				Timeout: 120 * time.Second,
+				Timeout: 30 * time.Minute,
+				APIURL:  apiURL,
 			},
 		},
 	})

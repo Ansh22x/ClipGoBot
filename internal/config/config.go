@@ -17,6 +17,8 @@ type Config struct {
 	DownloadDir            string
 	MaxConcurrentDownloads int
 	TelegramUploadLimitMB  int64
+	TelegramAPIBase        string
+	PotProviderURL         string
 	FreeDailyQuota         int
 	RateLimitCooldownSec   int
 	YtDlpPath              string
@@ -36,8 +38,17 @@ func LoadConfig() (*Config, error) {
 	adminIDsStr := getEnv("ADMIN_IDS", "")
 	dbPath := getEnv("DB_PATH", "data/bot.db")
 	downloadDir := getEnv("DOWNLOAD_DIR", "downloads")
-	maxConcurrent := getEnvInt("MAX_CONCURRENT_DOWNLOADS", 5)
-	uploadLimitMB := int64(getEnvInt("TELEGRAM_UPLOAD_LIMIT_MB", 50))
+	maxConcurrent := getEnvInt("MAX_CONCURRENT_DOWNLOADS", 4)
+	tgAPIBase := getEnv("TG_API_BASE", getEnv("TELEGRAM_API_BASE", "http://tg-bot-api:8081"))
+	potURL := getEnv("POT_PROVIDER_URL", getEnv("BGUTIL_URL", "http://bgutil:4416"))
+
+	// Default to 1900MB for local Bot API, or 50MB for official cloud API
+	defaultUploadMB := 1900
+	if tgAPIBase == "https://api.telegram.org" || strings.Contains(tgAPIBase, "api.telegram.org") {
+		defaultUploadMB = 50
+	}
+	uploadLimitMB := int64(getEnvInt("TELEGRAM_UPLOAD_LIMIT_MB", defaultUploadMB))
+
 	freeDailyQuota := getEnvInt("FREE_DAILY_QUOTA", 5)
 	rateLimitSec := getEnvInt("RATE_LIMIT_COOLDOWN_SEC", 3)
 	ytDlpPath := getEnv("YTDLP_PATH", "yt-dlp")
@@ -58,6 +69,8 @@ func LoadConfig() (*Config, error) {
 		DownloadDir:            downloadDir,
 		MaxConcurrentDownloads: maxConcurrent,
 		TelegramUploadLimitMB:  uploadLimitMB,
+		TelegramAPIBase:        tgAPIBase,
+		PotProviderURL:         potURL,
 		FreeDailyQuota:         freeDailyQuota,
 		RateLimitCooldownSec:   rateLimitSec,
 		YtDlpPath:              ytDlpPath,
