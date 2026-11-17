@@ -116,7 +116,7 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--impersonate", "chrome",
 		"--socket-timeout", "15",
 		"--retries", "3",
-		"--js-runtimes", "node",
+		"--js-runtimes", "deno",
 		"--geo-bypass",
 	}
 	if d.cfg.PotProviderURL != "" {
@@ -143,7 +143,7 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--impersonate", "chrome",
 			"--socket-timeout", "15",
 			"--retries", "3",
-			"--js-runtimes", "node",
+			"--js-runtimes", "deno",
 			"--geo-bypass",
 		}
 		if d.cfg.PotProviderURL != "" {
@@ -269,7 +269,7 @@ func (d *Downloader) DownloadMedia(
 			"--convert-thumbnails", "jpg",
 			"--no-playlist",
 			"--geo-bypass",
-			"--js-runtimes", "node",
+			"--js-runtimes", "deno",
 		}
 		if proxy := d.cfg.GetProxyURL(); proxy != "" {
 			args = append(args, "--proxy", proxy)
