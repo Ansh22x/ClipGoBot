@@ -401,11 +401,7 @@ func (d *Downloader) DownloadMedia(
 		if strat.Impersonate {
 			args = append(args, "--impersonate", "chrome")
 		}
-		if platform == PlatformYouTube {
-			args = append(args, "--concurrent-fragments", "4")
-		} else {
-			args = append(args, "--concurrent-fragments", "8")
-		}
+		args = append(args, "--concurrent-fragments", concurrentFragments(platform))
 		if proxy := d.cfg.GetProxyURL(); proxy != "" {
 			args = append(args, "--proxy", proxy)
 		}
@@ -692,4 +688,17 @@ func urlQueryEscape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func concurrentFragments(platform string) string {
+	switch platform {
+	case PlatformInstagram:
+		return "3"
+	case PlatformYouTube:
+		return "4"
+	case PlatformTikTok:
+		return "8"
+	default:
+		return "4"
+	}
 }
