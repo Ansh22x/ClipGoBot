@@ -657,7 +657,28 @@ To fix YouTube 429 Rate Limits:
 	return err
 }
 
-// 15. /setproxy: Configure a network proxy for yt-dlp downloads
+// 15. /delcookies: Delete installed cookies
+func (h *AdminHandler) HandleDelCookies(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+	targets := []string{"cookies.txt", "data/cookies.txt", "/app/data/cookies.txt"}
+	deleted := 0
+	for _, t := range targets {
+		if fi, err := os.Stat(t); err == nil && fi.Size() > 0 {
+			if err := os.Remove(t); err == nil {
+				deleted++
+			}
+		}
+	}
+	if deleted > 0 {
+		GlobalLogBuffer.Append(fmt.Sprintf("Admin %d deleted cookies file", ctx.EffectiveUser.Id))
+		_, err := msg.Reply(b, "✅ <b>Cookies removed successfully!</b>\nDownloads will now use direct/unauthenticated requests.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+		return err
+	}
+	_, err := msg.Reply(b, "ℹ️ No active cookies file found to delete.", &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return err
+}
+
+// 16. /setproxy: Configure a network proxy for yt-dlp downloads
 func (h *AdminHandler) HandleSetProxy(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	args := ctx.Args()

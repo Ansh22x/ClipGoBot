@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o bot main.go
 # Stage 2: Runtime environment with Python 3.11 slim, Deno, yt-dlp with curl-cffi, and bgutil
 FROM python:3.11-slim
 
-# Install system dependencies: FFmpeg, curl, ca-certificates, tzdata, aria2, unzip
+# Install system dependencies: FFmpeg, curl, ca-certificates, tzdata, aria2, unzip, nodejs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     aria2 \
     unzip \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install official Deno runtime for YouTube JS challenge solving
@@ -38,8 +39,8 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 # Install yt-dlp with curl-cffi (enables Chrome TLS impersonation) and bgutil PO Token plugin
 RUN pip install --no-cache-dir "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider
 
-# Configure global yt-dlp config: enable Deno, remote EJS components from GitHub, and IPv4
-RUN mkdir -p /etc && printf -- "--js-runtimes deno\n--remote-components ejs:github\n--force-ipv4\n" > /etc/yt-dlp.conf
+# Configure global yt-dlp config: enable Deno & Node.js, remote EJS components from GitHub, and IPv4
+RUN mkdir -p /etc && printf -- "--js-runtimes deno,node\n--remote-components ejs:github\n--force-ipv4\n" > /etc/yt-dlp.conf
 
 WORKDIR /app
 

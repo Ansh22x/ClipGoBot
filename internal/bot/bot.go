@@ -118,6 +118,8 @@ func (e *BotEngine) registerHandlers() {
 	d.AddHandler(handlers.NewCommand("restore", mw.RequireAdmin(adminH.HandleRestore)))
 	d.AddHandler(handlers.NewCommand("setcookies", mw.RequireAdmin(adminH.HandleSetCookies)))
 	d.AddHandler(handlers.NewCommand("checkcookies", mw.RequireAdmin(adminH.HandleCheckCookies)))
+	d.AddHandler(handlers.NewCommand("delcookies", mw.RequireAdmin(adminH.HandleDelCookies)))
+	d.AddHandler(handlers.NewCommand("clearcookies", mw.RequireAdmin(adminH.HandleDelCookies)))
 	d.AddHandler(handlers.NewCommand("setproxy", mw.RequireAdmin(adminH.HandleSetProxy)))
 	d.AddHandler(handlers.NewCommand("checkproxy", mw.RequireAdmin(adminH.HandleCheckProxy)))
 
@@ -170,6 +172,7 @@ func (e *BotEngine) registerTelegramCommands() {
 		{Command: "restore", Description: "[Admin] Restore database from backup file"},
 		{Command: "setcookies", Description: "[Admin] Install cookies.txt for YouTube"},
 		{Command: "checkcookies", Description: "[Admin] Check active cookies.txt status"},
+		{Command: "delcookies", Description: "[Admin] Delete active cookies.txt file"},
 		{Command: "setproxy", Description: "[Admin] Configure download proxy URL"},
 		{Command: "checkproxy", Description: "[Admin] Check active proxy status"},
 	}...)

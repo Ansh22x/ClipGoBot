@@ -9,6 +9,9 @@ data/*.db-wal
 data/*.db-shm
 !data/.gitkeep
 .env
+*cookies.txt
+cookies.txt
+data/cookies.txt
 
 # Temporary downloaded media
 downloads/*

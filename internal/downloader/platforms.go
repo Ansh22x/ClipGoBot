@@ -15,7 +15,7 @@ const (
 
 // Regex patterns for the 4 platforms
 var (
-	ytRegex = regexp.MustCompile(`(?i)(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})[^\s]*`)
+	ytRegex = regexp.MustCompile(`(?i)(?:https?:\/\/)?(?:(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?(?:[^ \t\n\r"'>]*&)?v=|shorts\/|embed\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})[^\s]*`)
 	igRegex = regexp.MustCompile(`(?i)(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|reels|tv|stories\/[^\/\s]+)\/([a-zA-Z0-9_-]+)[^\s]*`)
 	ttRegex = regexp.MustCompile(`(?i)(?:https?:\/\/)?(?:(?:www|vm|vt|m)\.)?tiktok\.com\/(?:@[\w.-]+\/video\/\d+|t\/[a-zA-Z0-9]+|[\w.-]+\S*)[^\s]*`)
 	twRegex = regexp.MustCompile(`(?i)(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/status(?:es)?\/(\d+)[^\s]*`)
@@ -71,6 +71,8 @@ func DetectLink(text string) *ExtractedLink {
 
 func cleanURL(raw string) string {
 	raw = strings.TrimSpace(raw)
+	// Strip trailing punctuation often copied along with links in chats
+	raw = strings.TrimRight(raw, ".,!?:;\"')]>}")
 	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
 		raw = "https://" + raw
 	}

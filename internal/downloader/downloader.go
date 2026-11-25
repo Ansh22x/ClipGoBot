@@ -78,7 +78,11 @@ func (d *Downloader) CancelUserDownload(userID int64) bool {
 	return false
 }
 
-func getCookieArgs() []string {
+func (d *Downloader) getCookieArgs(useCookies bool) []string {
+	if !useCookies {
+		return nil
+	}
+
 	// Auto-populate cookies file if COOKIES_DATA env variable is provided
 	if raw := os.Getenv("COOKIES_DATA"); strings.TrimSpace(raw) != "" {
 		for _, target := range []string{"data/cookies.txt", "/app/data/cookies.txt"} {
@@ -116,23 +120,24 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--impersonate", "chrome",
 		"--socket-timeout", "15",
 		"--retries", "3",
-		"--js-runtimes", "deno",
+		"--js-runtimes", "deno,node",
+		"--remote-components", "ejs:github",
 		"--geo-bypass",
 	}
 	if d.cfg.PotProviderURL != "" {
 		args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
 	}
-	args = append(args, "--extractor-args", "youtube:player_client=web_safari,tv;fetch_pot=always")
+	args = append(args, "--extractor-args", "youtube:player-client=mweb,tv,web_safari")
 	if proxy := d.cfg.GetProxyURL(); proxy != "" {
 		args = append(args, "--proxy", proxy)
 	}
-	args = append(args, getCookieArgs()...)
+	args = append(args, d.getCookieArgs(true)...)
 	args = append(args, url)
 
 	cmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, args...)
 	output, err := cmd.Output()
 	if err != nil {
-		// Fallback attempt with android_vr
+		// Fallback attempt with ios,tv without cookies
 		fbArgs := []string{
 			"--dump-single-json",
 			"--no-warnings",
@@ -140,20 +145,16 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--skip-download",
 			"--force-ipv4",
 			"--no-check-certificates",
-			"--impersonate", "chrome",
 			"--socket-timeout", "15",
 			"--retries", "3",
-			"--js-runtimes", "deno",
+			"--js-runtimes", "deno,node",
+			"--remote-components", "ejs:github",
 			"--geo-bypass",
+			"--extractor-args", "youtube:player-client=ios,tv",
 		}
-		if d.cfg.PotProviderURL != "" {
-			fbArgs = append(fbArgs, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
-		}
-		fbArgs = append(fbArgs, "--extractor-args", "youtube:player_client=android_vr;fetch_pot=always")
 		if proxy := d.cfg.GetProxyURL(); proxy != "" {
 			fbArgs = append(fbArgs, "--proxy", proxy)
 		}
-		fbArgs = append(fbArgs, getCookieArgs()...)
 		fbArgs = append(fbArgs, url)
 		fbCmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, fbArgs...)
 		output, err = fbCmd.Output()
@@ -211,35 +212,86 @@ func (d *Downloader) DownloadMedia(
 
 	// Fast Format Selector:
 	// For YouTube: up to 1080p, bounded approx size for Telegram
-	formatSelector := "bv*[height<=1080][filesize_approx<1600M]+ba/b[height<=1080][filesize_approx<1600M]/bv*[filesize_approx<1600M]+ba/b/best"
+	formatSelector := "bv*[height<=?1080][filesize_approx<=?1600M]+ba/b[height<=?1080][filesize_approx<=?1600M]/bv*[filesize_approx<=?1600M]+ba/b/best"
 	if platform != PlatformYouTube {
 		formatSelector = "b/bv*+ba/best"
 	}
 
-	// Define player client strategies to try
-	var clientStrategies []struct {
-		ClientArg string
+	type strategy struct {
+		Name        string
+		ClientArg   string
+		UsePot      bool
+		UseCookies  bool
+		Impersonate bool
 	}
 
+	var clientStrategies []strategy
+	hasCookies := len(d.getCookieArgs(true)) > 0
+
 	if platform == PlatformYouTube {
-		potBase := ""
-		if d.cfg.PotProviderURL != "" {
-			potBase = ";youtubepot-bgutilhttp:base_url=" + d.cfg.PotProviderURL
+		// 1. Mobile Web & TV client with PO Token & cookies (if available)
+		clientStrategies = append(clientStrategies, strategy{
+			Name:        "mweb,tv (POT+cookies)",
+			ClientArg:   "youtube:player-client=mweb,tv,web_safari",
+			UsePot:      true,
+			UseCookies:  hasCookies,
+			Impersonate: true,
+		})
+
+		// 2. iOS client (avoids web bot guard checks)
+		clientStrategies = append(clientStrategies, strategy{
+			Name:        "ios,tv (cookies)",
+			ClientArg:   "youtube:player-client=ios,tv",
+			UsePot:      false,
+			UseCookies:  hasCookies,
+			Impersonate: true,
+		})
+
+		// 3. TV client
+		clientStrategies = append(clientStrategies, strategy{
+			Name:        "tv,mweb",
+			ClientArg:   "youtube:player-client=tv,mweb",
+			UsePot:      false,
+			UseCookies:  hasCookies,
+			Impersonate: true,
+		})
+
+		// If cookies were present and attempts 1-3 failed, try WITHOUT cookies!
+		// (Crucial fallback if cookies file is expired, invalid, or flagged)
+		if hasCookies {
+			clientStrategies = append(clientStrategies, strategy{
+				Name:        "ios,tv (no cookies)",
+				ClientArg:   "youtube:player-client=ios,tv",
+				UsePot:      false,
+				UseCookies:  false,
+				Impersonate: true,
+			})
+			clientStrategies = append(clientStrategies, strategy{
+				Name:        "mweb,tv (no cookies)",
+				ClientArg:   "youtube:player-client=mweb,tv,web_safari",
+				UsePot:      true,
+				UseCookies:  false,
+				Impersonate: true,
+			})
 		}
-		clientStrategies = []struct{ ClientArg string }{
-			{ClientArg: "youtube:player_client=web_safari,tv;fetch_pot=always" + potBase},
-			{ClientArg: "youtube:player_client=android_vr;fetch_pot=always" + potBase},
-			{ClientArg: "youtube:player_client=android,mweb"},
-			{ClientArg: "youtube:player_client=web,mweb"},
-			{ClientArg: ""},
-		}
+
+		// 4. Fallback: default client chain without forcing client args or impersonate
+		clientStrategies = append(clientStrategies, strategy{
+			Name:        "default yt-dlp",
+			ClientArg:   "",
+			UsePot:      false,
+			UseCookies:  false,
+			Impersonate: false,
+		})
 	} else if platform == PlatformTikTok {
-		clientStrategies = []struct{ ClientArg string }{
-			{ClientArg: "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com"},
-			{ClientArg: ""},
+		clientStrategies = []strategy{
+			{Name: "tiktok api", ClientArg: "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com", UseCookies: hasCookies, Impersonate: true},
+			{Name: "default tiktok", ClientArg: "", UseCookies: false, Impersonate: false},
 		}
 	} else {
-		clientStrategies = []struct{ ClientArg string }{{ClientArg: ""}}
+		clientStrategies = []strategy{
+			{Name: "default", ClientArg: "", UseCookies: hasCookies, Impersonate: true},
+		}
 	}
 
 	var downloadErr error
@@ -254,10 +306,7 @@ func (d *Downloader) DownloadMedia(
 			"--force-ipv4",
 			"--no-check-certificates",
 			"--add-header", "Accept-Language: en-US,en;q=0.9",
-			"--impersonate", "chrome",
-			"--concurrent-fragments", "16",
 			"--buffer-size", "64K",
-			"--http-chunk-size", "10M",
 			"--no-part",
 			"--no-mtime",
 			"--no-cache-dir",
@@ -269,15 +318,29 @@ func (d *Downloader) DownloadMedia(
 			"--convert-thumbnails", "jpg",
 			"--no-playlist",
 			"--geo-bypass",
-			"--js-runtimes", "deno",
+			"--js-runtimes", "deno,node",
+			"--remote-components", "ejs:github",
+		}
+		if strat.Impersonate {
+			args = append(args, "--impersonate", "chrome")
+		}
+		if platform == PlatformYouTube {
+			args = append(args, "--concurrent-fragments", "4")
+		} else {
+			args = append(args, "--concurrent-fragments", "8")
 		}
 		if proxy := d.cfg.GetProxyURL(); proxy != "" {
 			args = append(args, "--proxy", proxy)
 		}
+		if strat.UsePot && d.cfg.PotProviderURL != "" {
+			args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
+		}
 		if strat.ClientArg != "" {
 			args = append(args, "--extractor-args", strat.ClientArg)
 		}
-		args = append(args, getCookieArgs()...)
+		if cookieArgs := d.getCookieArgs(strat.UseCookies); len(cookieArgs) > 0 {
+			args = append(args, cookieArgs...)
+		}
 		args = append(args, "-o", outputPattern, targetURL)
 
 		cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
@@ -297,10 +360,13 @@ func (d *Downloader) DownloadMedia(
 		scanner := bufio.NewScanner(stdoutPipe)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if len(lastOutputLines) >= 8 {
-				lastOutputLines = lastOutputLines[1:]
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" {
+				if len(lastOutputLines) >= 12 {
+					lastOutputLines = lastOutputLines[1:]
+				}
+				lastOutputLines = append(lastOutputLines, trimmed)
 			}
-			lastOutputLines = append(lastOutputLines, line)
 
 			if info := ParseProgressLine(line); info != nil {
 				tracker.Update(info)
@@ -319,7 +385,7 @@ func (d *Downloader) DownloadMedia(
 		}
 
 		downloadErr = waitErr
-		log.Printf("[yt-dlp attempt %d failed] %v (client=%s): %s", attemptIdx+1, waitErr, strat.ClientArg, strings.Join(lastOutputLines, " | "))
+		log.Printf("[downloader attempt %d failed (%s)]: %v: %s", attemptIdx+1, strat.Name, waitErr, strings.Join(lastOutputLines, " | "))
 	}
 
 	var meta MediaMetadata

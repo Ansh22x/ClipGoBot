@@ -10,10 +10,10 @@ if [ -n "$COOKIES_DATA" ]; then
     echo "Cookies successfully installed to /app/data/cookies.txt"
 fi
 
-# Keep yt-dlp updated on container startup to fix platform breakages
+# Keep yt-dlp & bgutil provider updated on container startup to fix platform breakages
 if [ -z "$NO_UPDATE_YTDLP" ]; then
-    echo "Checking and updating yt-dlp with curl-cffi..."
-    pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" || echo "yt-dlp already at latest or update skipped."
+    echo "Checking and updating yt-dlp and plugins..."
+    pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider || echo "yt-dlp already at latest or update skipped."
 fi
 
 exec "$@"
