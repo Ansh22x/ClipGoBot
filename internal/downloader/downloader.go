@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -492,7 +495,7 @@ func (d *Downloader) DownloadMedia(
 	}
 
 	var meta MediaMetadata
-	var tikwmDownloadedPath string
+	var fallbackDownloadedPath string
 
 	if downloadErr != nil {
 		if platform == PlatformTikTok {
@@ -502,9 +505,20 @@ func (d *Downloader) DownloadMedia(
 			if tikErr == nil {
 				downloadErr = nil
 				meta = *tikMeta
-				tikwmDownloadedPath = dstPath
+				fallbackDownloadedPath = dstPath
 			} else {
 				log.Printf("[downloader] TikWM fallback failed: %v", tikErr)
+			}
+		} else if platform == PlatformInstagram {
+			log.Printf("[downloader] yt-dlp failed on Instagram, falling back to embed scraper: %s", targetURL)
+			dstPath := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_ig_%d.mp4", userID, time.Now().UnixNano()))
+			igMeta, igErr := d.downloadInstagramEmbed(userCtx, targetURL, dstPath)
+			if igErr == nil {
+				downloadErr = nil
+				meta = *igMeta
+				fallbackDownloadedPath = dstPath
+			} else {
+				log.Printf("[downloader] Instagram embed fallback failed: %v", igErr)
 			}
 		}
 	}
@@ -529,7 +543,7 @@ func (d *Downloader) DownloadMedia(
 	tracker.Finish("⚡ <b>Download complete! Preparing to upload...</b>")
 
 	// 5. Read metadata directly from generated .info.json (Single-pass extraction)
-	if tikwmDownloadedPath == "" {
+	if fallbackDownloadedPath == "" {
 		jsonPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.info.json", userID))
 		if jsonMatches, _ := filepath.Glob(jsonPattern); len(jsonMatches) > 0 {
 			if rawJSON, readErr := os.ReadFile(jsonMatches[0]); readErr == nil {
@@ -543,8 +557,8 @@ func (d *Downloader) DownloadMedia(
 
 	// 6. Locate final downloaded video file
 	var targetFilePath string
-	if tikwmDownloadedPath != "" {
-		targetFilePath = tikwmDownloadedPath
+	if fallbackDownloadedPath != "" {
+		targetFilePath = fallbackDownloadedPath
 	} else {
 		filePattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.mp4", userID, meta.ID))
 		matches, _ := filepath.Glob(filePattern)
@@ -675,6 +689,175 @@ func (d *Downloader) downloadTikWM(ctx context.Context, targetURL, dstPath strin
 		Width:    r.Data.Width,
 		Height:   r.Data.Height,
 	}, nil
+}
+
+// downloadInstagramEmbed fetches embed captioned page and extracts video stream as fallback
+func (d *Downloader) downloadInstagramEmbed(ctx context.Context, targetURL, dstPath string) (*MediaMetadata, error) {
+	// 1. Extract Instagram shortcode / ID
+	matches := igRegex.FindStringSubmatch(targetURL)
+	var id string
+	if len(matches) > 1 && matches[1] != "" {
+		id = matches[1]
+	} else {
+		fbRegex := regexp.MustCompile(`(?i)(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)`)
+		fbMatches := fbRegex.FindStringSubmatch(targetURL)
+		if len(fbMatches) > 1 && fbMatches[1] != "" {
+			id = fbMatches[1]
+		}
+	}
+	if id == "" {
+		return nil, fmt.Errorf("could not extract Instagram ID from %s", targetURL)
+	}
+
+	embedURL := fmt.Sprintf("https://www.instagram.com/reel/%s/embed/captioned/", id)
+	req, err := http.NewRequestWithContext(ctx, "GET", embedURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embed request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	client := &http.Client{Timeout: 45 * time.Second}
+	if p := d.cfg.GetProxyURL(); p != "" {
+		if proxyParsed, pErr := url.Parse(p); pErr == nil {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(proxyParsed),
+			}
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch instagram embed page: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instagram embed returned HTTP %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embed response body: %w", err)
+	}
+	htmlContent := string(bodyBytes)
+
+	// Extract video URL and caption from embed HTML
+	videoURL, caption := extractInstagramEmbedData(htmlContent)
+	if videoURL == "" {
+		return nil, fmt.Errorf("could not extract video URL from embed page for %s", id)
+	}
+
+	// Download video stream to dstPath
+	dlReq, err := http.NewRequestWithContext(ctx, "GET", videoURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video stream request: %w", err)
+	}
+	dlReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+	dlReq.Header.Set("Referer", "https://www.instagram.com/")
+
+	dlResp, err := client.Do(dlReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download video stream: %w", err)
+	}
+	defer dlResp.Body.Close()
+
+	if dlResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("instagram video stream returned HTTP %d", dlResp.StatusCode)
+	}
+
+	out, err := os.Create(dstPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, dlResp.Body); err != nil {
+		_ = os.Remove(dstPath)
+		return nil, fmt.Errorf("failed to write video stream: %w", err)
+	}
+
+	if caption == "" {
+		caption = fmt.Sprintf("Instagram Reel %s", id)
+	}
+
+	return &MediaMetadata{
+		ID:    id,
+		Title: caption,
+		Ext:   "mp4",
+	}, nil
+}
+
+func extractInstagramEmbedData(htmlContent string) (videoURL, caption string) {
+	if idx := strings.Index(htmlContent, "contextJSON"); idx != -1 {
+		sub := htmlContent[idx:]
+		blockEnd := len(sub)
+		if end := strings.Index(sub, "</script>"); end != -1 && end < blockEnd {
+			blockEnd = end
+		}
+		block := sub[:blockEnd]
+		videoURL = extractVideoURLString(block)
+		caption = extractCaptionString(block)
+	}
+
+	if videoURL == "" {
+		videoURL = extractVideoURLString(htmlContent)
+	}
+	if caption == "" {
+		caption = extractCaptionString(htmlContent)
+	}
+
+	return videoURL, caption
+}
+
+var (
+	igVideoURLRegexes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:\\"|")video_url(?:\\"|")\s*:\s*(?:\\"|")([^"\\ ]+)(?:\\"|")`),
+		regexp.MustCompile(`(?i)"video_url"\s*:\s*"([^"]+)"`),
+		regexp.MustCompile(`(?i)<video[^>]+src=["']([^"']+)["']`),
+	}
+	igCaptionRegexes = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:\\"|")text(?:\\"|")\s*:\s*(?:\\"|")([^"\\]+)(?:\\"|")`),
+		regexp.MustCompile(`(?i)(?:\\"|")caption(?:\\"|")\s*:\s*(?:\\"|")([^"\\]+)(?:\\"|")`),
+	}
+)
+
+func extractVideoURLString(content string) string {
+	for _, re := range igVideoURLRegexes {
+		if m := re.FindStringSubmatch(content); len(m) > 1 && m[1] != "" {
+			u := m[1]
+			u = strings.ReplaceAll(u, `\/`, `/`)
+			u = strings.ReplaceAll(u, `\\/`, `/`)
+			u = strings.ReplaceAll(u, `\u0026`, `&`)
+			u = strings.ReplaceAll(u, `&amp;`, `&`)
+			u = html.UnescapeString(u)
+			u = strings.TrimSpace(u)
+			if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+				return u
+			}
+		}
+	}
+	return ""
+}
+
+func extractCaptionString(content string) string {
+	for _, re := range igCaptionRegexes {
+		if m := re.FindStringSubmatch(content); len(m) > 1 && m[1] != "" {
+			c := m[1]
+			c = strings.ReplaceAll(c, `\/`, `/`)
+			c = strings.ReplaceAll(c, `\n`, " ")
+			c = html.UnescapeString(c)
+			c = strings.TrimSpace(c)
+			if len(c) > 200 {
+				c = c[:200]
+			}
+			if c != "" {
+				return c
+			}
+		}
+	}
+	return ""
 }
 
 func urlQueryEscape(s string) string {
