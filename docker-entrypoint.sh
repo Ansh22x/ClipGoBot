@@ -10,10 +10,10 @@ if [ -n "$COOKIES_DATA" ] && [ ! -s /app/data/cookies.txt ]; then
     echo "Cookies successfully installed to /app/data/cookies.txt"
 fi
 
-# Keep yt-dlp & bgutil provider updated on container startup to fix platform breakages
-if [ -z "$NO_UPDATE_YTDLP" ]; then
-    echo "Checking and updating yt-dlp and plugins..."
-    pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider || echo "yt-dlp already at latest or update skipped."
+# Opt-in runtime update for yt-dlp via UPD_YTDLP=1 (default off to protect pinned dependencies)
+if [ "$UPD_YTDLP" = "1" ]; then
+    echo "Updating yt-dlp and plugins (UPD_YTDLP=1)..."
+    pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider || echo "yt-dlp update failed or skipped."
 fi
 
 exec "$@"
