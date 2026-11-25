@@ -368,10 +368,28 @@ func (d *Downloader) DownloadMedia(
 			{Name: "tiktok api", ClientArg: "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com", UseCookies: hasCookies, Impersonate: true},
 			{Name: "default tiktok", ClientArg: "", UseCookies: false, Impersonate: false},
 		}
-	} else {
-		clientStrategies = []strategy{
-			{Name: "default", ClientArg: "", UseCookies: hasCookies, Impersonate: true},
+	} else if platform == PlatformInstagram {
+		if hasCookies {
+			clientStrategies = append(clientStrategies,
+				strategy{Name: "instagram (cookies+impersonate)", ClientArg: "", UseCookies: true, Impersonate: true},
+				strategy{Name: "instagram ios (cookies+impersonate)", ClientArg: "instagram:app_id=ios", UseCookies: true, Impersonate: true},
+			)
 		}
+		clientStrategies = append(clientStrategies,
+			strategy{Name: "instagram ios (no cookies, impersonate)", ClientArg: "instagram:app_id=ios", UseCookies: false, Impersonate: true},
+			strategy{Name: "instagram (no cookies, impersonate)", ClientArg: "", UseCookies: false, Impersonate: true},
+			strategy{Name: "default instagram (no cookies, no impersonate)", ClientArg: "", UseCookies: false, Impersonate: false},
+		)
+	} else {
+		if hasCookies {
+			clientStrategies = append(clientStrategies,
+				strategy{Name: "default (cookies+impersonate)", ClientArg: "", UseCookies: true, Impersonate: true},
+			)
+		}
+		clientStrategies = append(clientStrategies,
+			strategy{Name: "default (no cookies, impersonate)", ClientArg: "", UseCookies: false, Impersonate: true},
+			strategy{Name: "default (no cookies, no impersonate)", ClientArg: "", UseCookies: false, Impersonate: false},
+		)
 	}
 
 	var downloadErr error
