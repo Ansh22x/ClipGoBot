@@ -269,6 +269,20 @@ func (d *Downloader) DownloadMedia(
 		return nil, fmt.Errorf("failed to create download dir: %w", err)
 	}
 
+	// Pre-run cleanup: remove existing stale artifacts for this user
+	cleanPatterns := []string{
+		filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.mp4", userID)),
+		filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.info.json", userID)),
+		filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.jpg", userID)),
+	}
+	for _, pat := range cleanPatterns {
+		if matches, err := filepath.Glob(pat); err == nil {
+			for _, m := range matches {
+				_ = os.Remove(m)
+			}
+		}
+	}
+
 	// 4. Setup progress tracker
 	tracker := NewProgressTracker(onProgress)
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
