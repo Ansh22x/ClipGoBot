@@ -120,7 +120,7 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		"--impersonate", "chrome",
 		"--socket-timeout", "15",
 		"--retries", "3",
-		"--js-runtimes", "deno,node",
+		"--js-runtimes", "deno",
 		"--remote-components", "ejs:github",
 		"--geo-bypass",
 	}
@@ -147,7 +147,7 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 			"--no-check-certificates",
 			"--socket-timeout", "15",
 			"--retries", "3",
-			"--js-runtimes", "deno,node",
+			"--js-runtimes", "deno",
 			"--remote-components", "ejs:github",
 			"--geo-bypass",
 			"--extractor-args", "youtube:player-client=ios,tv",
@@ -309,7 +309,6 @@ func (d *Downloader) DownloadMedia(
 			"--buffer-size", "64K",
 			"--no-part",
 			"--no-mtime",
-			"--no-cache-dir",
 			"--socket-timeout", "20",
 			"--retries", "5",
 			"--fragment-retries", "5",
@@ -318,7 +317,7 @@ func (d *Downloader) DownloadMedia(
 			"--convert-thumbnails", "jpg",
 			"--no-playlist",
 			"--geo-bypass",
-			"--js-runtimes", "deno,node",
+			"--js-runtimes", "deno",
 			"--remote-components", "ejs:github",
 		}
 		if strat.Impersonate {
@@ -408,6 +407,7 @@ func (d *Downloader) DownloadMedia(
 
 	if downloadErr != nil {
 		errDetails := strings.Join(lastOutputLines, " | ")
+		log.Printf("[downloader] FINAL FAILURE for %s: %s", targetURL, errDetails)
 		return nil, fmt.Errorf("ERR_DOWNLOAD_FAILED: %s", errDetails)
 	}
 

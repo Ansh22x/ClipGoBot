@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-# Write cookies.txt from COOKIES_DATA environment variable if provided
-if [ -n "$COOKIES_DATA" ]; then
+# Write cookies.txt from COOKIES_DATA environment variable if provided and not already present
+if [ -n "$COOKIES_DATA" ] && [ ! -s /app/data/cookies.txt ]; then
     echo "Writing cookies from COOKIES_DATA environment variable..."
     mkdir -p /app/data
     printf "%s\n" "$COOKIES_DATA" > /app/data/cookies.txt

@@ -39,8 +39,8 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
 # Install yt-dlp with curl-cffi (enables Chrome TLS impersonation) and bgutil PO Token plugin
 RUN pip install --no-cache-dir "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider
 
-# Configure global yt-dlp config: enable Deno & Node.js, remote EJS components from GitHub, and IPv4
-RUN mkdir -p /etc && printf -- "--js-runtimes deno,node\n--remote-components ejs:github\n--force-ipv4\n" > /etc/yt-dlp.conf
+# Configure global yt-dlp config: enable Deno, remote EJS components from GitHub, and IPv4
+RUN mkdir -p /etc && printf -- "--js-runtimes deno\n--remote-components ejs:github\n--force-ipv4\n" > /etc/yt-dlp.conf
 
 WORKDIR /app
 

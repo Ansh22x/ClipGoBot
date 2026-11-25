@@ -563,7 +563,16 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 		} else if strings.Contains(rawErr, "Too Many Requests") || strings.Contains(rawErr, "429") {
 			errMsg = "⏳ <b>YouTube Rate Limit:</b> Server IP received 429 Too Many Requests from YouTube. Please wait a few minutes."
 		} else if strings.HasPrefix(rawErr, "ERR_DOWNLOAD_FAILED") {
-			errMsg = ErrDownloadFailed
+			details := strings.TrimPrefix(rawErr, "ERR_DOWNLOAD_FAILED: ")
+			details = strings.TrimSpace(details)
+			if h.cfg.IsAdmin(user.Id) && details != "" {
+				if len(details) > 200 {
+					details = details[:200] + "..."
+				}
+				errMsg = fmt.Sprintf("❌ <b>Download Failed:</b>\n<code>%s</code>", htmlEscape(details))
+			} else {
+				errMsg = ErrDownloadFailed
+			}
 		} else {
 			errMsg = ResolveErrorMessage(rawErr)
 		}
