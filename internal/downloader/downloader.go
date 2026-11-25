@@ -137,6 +137,13 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 	cmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, args...)
 	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			log.Printf("[downloader] FetchMetadata primary error: %v, stderr: %s", err, string(exitErr.Stderr))
+		} else {
+			log.Printf("[downloader] FetchMetadata primary error: %v", err)
+		}
+
 		// Fallback attempt with ios,tv without cookies
 		fbArgs := []string{
 			"--dump-single-json",
@@ -159,6 +166,11 @@ func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetad
 		fbCmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, fbArgs...)
 		output, err = fbCmd.Output()
 		if err != nil {
+			if errors.As(err, &exitErr) {
+				log.Printf("[downloader] FetchMetadata fallback error: %v, stderr: %s", err, string(exitErr.Stderr))
+			} else {
+				log.Printf("[downloader] FetchMetadata fallback error: %v", err)
+			}
 			return nil, fmt.Errorf("failed to fetch metadata: %w", err)
 		}
 	}
@@ -296,6 +308,7 @@ func (d *Downloader) DownloadMedia(
 
 	var downloadErr error
 	var lastOutputLines []string
+	var lastAttemptStderr []string
 
 	for attemptIdx, strat := range clientStrategies {
 		args := []string{
@@ -348,12 +361,36 @@ func (d *Downloader) DownloadMedia(
 			downloadErr = pipeErr
 			continue
 		}
-		cmd.Stderr = cmd.Stdout
+		stderrPipe, stderrPipeErr := cmd.StderrPipe()
+		if stderrPipeErr != nil {
+			downloadErr = stderrPipeErr
+			continue
+		}
 
 		if startErr := cmd.Start(); startErr != nil {
 			downloadErr = startErr
 			continue
 		}
+
+		attemptStderr := make([]string, 0, 20)
+		var stderrMu sync.Mutex
+		var stderrWg sync.WaitGroup
+		stderrWg.Add(1)
+		go func() {
+			defer stderrWg.Done()
+			stderrScanner := bufio.NewScanner(stderrPipe)
+			for stderrScanner.Scan() {
+				line := strings.TrimSpace(stderrScanner.Text())
+				if line != "" {
+					stderrMu.Lock()
+					if len(attemptStderr) >= 20 {
+						attemptStderr = attemptStderr[1:]
+					}
+					attemptStderr = append(attemptStderr, line)
+					stderrMu.Unlock()
+				}
+			}
+		}()
 
 		lastOutputLines = nil
 		scanner := bufio.NewScanner(stdoutPipe)
@@ -373,9 +410,15 @@ func (d *Downloader) DownloadMedia(
 		}
 
 		waitErr := cmd.Wait()
+		stderrWg.Wait()
+
 		if userCtx.Err() != nil {
 			return nil, errors.New("ERR_CANCELLED")
 		}
+
+		stderrMu.Lock()
+		lastAttemptStderr = attemptStderr
+		stderrMu.Unlock()
 
 		if waitErr == nil {
 			// Succeeded!
@@ -384,7 +427,7 @@ func (d *Downloader) DownloadMedia(
 		}
 
 		downloadErr = waitErr
-		log.Printf("[downloader attempt %d failed (%s)]: %v: %s", attemptIdx+1, strat.Name, waitErr, strings.Join(lastOutputLines, " | "))
+		log.Printf("[downloader attempt %d failed (%s)]: %v (stdout: %s | stderr: %s)", attemptIdx+1, strat.Name, waitErr, strings.Join(lastOutputLines, " | "), strings.Join(lastAttemptStderr, " | "))
 	}
 
 	var meta MediaMetadata
@@ -406,8 +449,19 @@ func (d *Downloader) DownloadMedia(
 	}
 
 	if downloadErr != nil {
-		errDetails := strings.Join(lastOutputLines, " | ")
-		log.Printf("[downloader] FINAL FAILURE for %s: %s", targetURL, errDetails)
+		log.Printf("[downloader] FINAL FAILURE for %s. Full stderr buffer (%d lines):\n%s", targetURL, len(lastAttemptStderr), strings.Join(lastAttemptStderr, "\n"))
+		last6 := lastAttemptStderr
+		if len(last6) > 6 {
+			last6 = last6[len(last6)-6:]
+		}
+		errDetails := strings.Join(last6, " | ")
+		if errDetails == "" {
+			if len(lastOutputLines) > 6 {
+				errDetails = strings.Join(lastOutputLines[len(lastOutputLines)-6:], " | ")
+			} else {
+				errDetails = strings.Join(lastOutputLines, " | ")
+			}
+		}
 		return nil, fmt.Errorf("ERR_DOWNLOAD_FAILED: %s", errDetails)
 	}
 

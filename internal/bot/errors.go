@@ -14,11 +14,14 @@ const (
 	ErrAlreadyDownloading = "🔄 You already have an active download in progress. Use /cancel to abort it."
 	ErrCancelled         = "🛑 Download process was cancelled."
 	ErrInternalServer    = "💥 An internal server error occurred while processing your request. Please try again later."
+	ErrDiagnostic        = "❌ Download failed. Diagnostic information recorded."
 )
 
 // ResolveErrorMessage converts an error code or message to user-facing string
 func ResolveErrorMessage(errStr string) string {
 	switch errStr {
+	case "ERR_DIAGNOSTIC":
+		return ErrDiagnostic
 	case "ERR_INVALID_URL":
 		return ErrInvalidURL
 	case "ERR_RATE_LIMITED":
