@@ -186,6 +186,9 @@ func (e *BotEngine) Start(ctx context.Context) error {
 	log.Printf("Starting bot @%s (ID: %d)...", e.bot.Username, e.bot.Id)
 	GlobalLogBuffer.Append(fmt.Sprintf("Bot started as @%s", e.bot.Username))
 
+	// Startup cookie validation check (logs warning on failure without aborting)
+	e.dl.ValidateCookiesStartup(ctx)
+
 	// Register bot command list in Telegram UI
 	e.registerTelegramCommands()
 

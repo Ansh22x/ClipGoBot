@@ -2,7 +2,10 @@ package downloader
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,12 +86,31 @@ func (d *Downloader) getCookieArgs(useCookies bool) []string {
 		return nil
 	}
 
-	// Auto-populate cookies file if COOKIES_DATA env variable is provided
+	// Auto-populate cookies file if COOKIES_DATA env variable is provided and differs from disk
 	if raw := os.Getenv("COOKIES_DATA"); strings.TrimSpace(raw) != "" {
+		dataBytes := []byte(strings.TrimSpace(raw) + "\n")
+		h := sha256.Sum256(dataBytes)
+		newSHA := hex.EncodeToString(h[:])
+
 		for _, target := range []string{"data/cookies.txt", "/app/data/cookies.txt"} {
-			if _, err := os.Stat(target); os.IsNotExist(err) {
-				_ = os.MkdirAll(filepath.Dir(target), 0755)
-				_ = os.WriteFile(target, []byte(raw), 0644)
+			dir := filepath.Dir(target)
+			shaFile := filepath.Join(dir, ".cookies.sha")
+
+			existing, readErr := os.ReadFile(target)
+			needsWrite := readErr != nil || len(existing) == 0
+			if !needsWrite {
+				storedSHA, _ := os.ReadFile(shaFile)
+				if strings.TrimSpace(string(storedSHA)) != newSHA || !bytes.Equal(existing, dataBytes) {
+					needsWrite = true
+				}
+			}
+
+			if needsWrite {
+				_ = os.MkdirAll(dir, 0755)
+				if err := os.WriteFile(target, dataBytes, 0644); err == nil {
+					_ = os.WriteFile(shaFile, []byte(newSHA), 0644)
+					log.Printf("[downloader] Synced %s from COOKIES_DATA (sha256: %s)", target, newSHA[:8])
+				}
 				break
 			}
 		}
@@ -105,6 +127,35 @@ func (d *Downloader) getCookieArgs(useCookies bool) []string {
 		}
 	}
 	return nil
+}
+
+// ValidateCookiesStartup checks the active cookies file against Instagram simulation without aborting startup
+func (d *Downloader) ValidateCookiesStartup(ctx context.Context) {
+	cookieLocations := []string{
+		"cookies.txt",
+		"data/cookies.txt",
+		"/app/data/cookies.txt",
+	}
+	var cookieFile string
+	for _, p := range cookieLocations {
+		if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+			cookieFile = p
+			break
+		}
+	}
+	if cookieFile == "" {
+		log.Println("[downloader] No cookies file found at startup.")
+		return
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, d.cfg.YtDlpPath, "--cookies", cookieFile, "--simulate", "--no-warnings", "https://www.instagram.com/")
+	if err := cmd.Run(); err != nil {
+		log.Printf("[downloader] WARNING: Startup cookie validation check failed for %s: %v (cookies may be invalid/expired, continuing startup)", cookieFile, err)
+	} else {
+		log.Printf("[downloader] Startup cookie validation successful using %s", cookieFile)
+	}
 }
 
 // FetchMetadata retrieves video metadata without downloading video stream

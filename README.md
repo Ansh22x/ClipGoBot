@@ -246,6 +246,17 @@ Telegram heavily rate-limits message edits. To prevent `429 Too Many Requests`:
 
 ---
 
+## 🍪 Cookies Configuration & Management
+
+For downloading from YouTube and Instagram (especially on cloud/datacenter IPs such as Oracle Cloud, AWS, or Hetzner), session cookies are required to avoid automated bot checks:
+
+1. **Netscape Format Required:** `cookies.txt` must be strictly formatted in standard Netscape HTTP Cookie format (tab-separated columns). Use browser extensions like *"Get cookies.txt LOCALLY"* from a dedicated/burner account.
+2. **Weekly Refresh:** Google and Instagram rotate session tokens (`__Secure-1PSIDTS`, `sessionid`) frequently. Cookies should be refreshed weekly to prevent authentication expiry.
+3. **Mounted File Preferred:** Storing multi-line cookie files inside the `COOKIES_DATA` environment variable can corrupt tab characters and newline escapes depending on shell escaping. **Prefer placing the file directly on the host at `./data/cookies.txt`** (which is automatically bind-mounted to `/app/data/cookies.txt` inside the container).
+4. **Admin Commands:** Administrators can upload a new `cookies.txt` directly via Telegram with `/setcookies`, check its status using `/checkcookies`, and delete expired cookies via `/delcookies`.
+
+---
+
 ## 🚀 Deployment Instructions
 
 ### Option 1: Docker Compose (Recommended)

@@ -1,13 +1,19 @@
 #!/bin/sh
 set -e
 
-# Write cookies.txt from COOKIES_DATA environment variable if provided and not already present
-if [ -n "$COOKIES_DATA" ] && [ ! -s /app/data/cookies.txt ]; then
-    echo "Writing cookies from COOKIES_DATA environment variable..."
+# Write cookies.txt when COOKIES_DATA is set AND either the file is missing OR COOKIES_DATA has changed
+if [ -n "$COOKIES_DATA" ]; then
     mkdir -p /app/data
-    printf "%s\n" "$COOKIES_DATA" > /app/data/cookies.txt
-    chmod 644 /app/data/cookies.txt
-    echo "Cookies successfully installed to /app/data/cookies.txt"
+    CURR_SHA=""
+    [ -f /app/data/.cookies.sha ] && CURR_SHA=$(cat /app/data/.cookies.sha)
+    NEW_SHA=$(printf "%s\n" "$COOKIES_DATA" | sha256sum | awk '{print $1}')
+    if [ ! -f /app/data/cookies.txt ] || [ "$CURR_SHA" != "$NEW_SHA" ]; then
+        echo "Writing cookies from COOKIES_DATA (new or changed checksum)..."
+        printf "%s\n" "$COOKIES_DATA" > /app/data/cookies.txt
+        chmod 644 /app/data/cookies.txt
+        echo "$NEW_SHA" > /app/data/.cookies.sha
+        echo "Cookies successfully installed to /app/data/cookies.txt"
+    fi
 fi
 
 # Opt-in runtime update for yt-dlp via UPD_YTDLP=1 (default off to protect pinned dependencies)
