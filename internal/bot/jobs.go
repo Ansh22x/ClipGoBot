@@ -5,36 +5,49 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"tg-media-bot/internal/config"
 	"tg-media-bot/internal/db"
+	"tg-media-bot/internal/downloader"
 )
 
-// BackgroundJobs orchestrates the 3 background jobs: Expiry Checker, Temp Cleanup, and Quota Reset
+const (
+	CanaryYouTube   = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+	CanaryInstagram = "https://www.instagram.com/reel/DgJQVGYHjTc/"
+	CanaryTikTok    = "https://www.tiktok.com/@tiktok/video/7106594312292453678"
+	CanaryTwitter   = "https://x.com/Twitter/status/1700000000000000000"
+)
+
+// BackgroundJobs orchestrates background jobs: Expiry Checker, Temp Cleanup, Quota Reset, and Canary Health
 type BackgroundJobs struct {
 	cfg      *config.Config
 	database *db.DB
 	bot      *gotgbot.Bot
+	dl       *downloader.Downloader
 }
 
 // NewBackgroundJobs initializes the background jobs manager
-func NewBackgroundJobs(cfg *config.Config, database *db.DB, bot *gotgbot.Bot) *BackgroundJobs {
+func NewBackgroundJobs(cfg *config.Config, database *db.DB, bot *gotgbot.Bot, dl *downloader.Downloader) *BackgroundJobs {
 	return &BackgroundJobs{
 		cfg:      cfg,
 		database: database,
 		bot:      bot,
+		dl:       dl,
 	}
 }
 
-// Start launches all 3 background routines with graceful shutdown support
+// Start launches background routines with graceful shutdown support
 func (j *BackgroundJobs) Start(ctx context.Context) {
 	go j.runExpiryChecker(ctx)
 	go j.runTempCleanup(ctx)
 	go j.runQuotaReset(ctx)
+	go j.runCanary(ctx)
 }
 
 // 1. Expiry Checker Job: runs every 10 minutes
@@ -133,6 +146,96 @@ func (j *BackgroundJobs) runQuotaReset(ctx context.Context) {
 			grpAffected, grpErr := j.database.ResetGroupDailyQuotas()
 			if grpErr == nil && grpAffected > 0 {
 				GlobalLogBuffer.Append(fmt.Sprintf("QuotaReset: reset daily quota for %d groups", grpAffected))
+			}
+		}
+	}
+}
+
+// 4. Canary Job: runs every 15 minutes, resolves known clips to monitor platform health
+func (j *BackgroundJobs) runCanary(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	// Initial check 30 seconds after startup
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second):
+		j.checkCanaries(ctx)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			j.checkCanaries(ctx)
+		}
+	}
+}
+
+func (j *BackgroundJobs) checkCanaries(ctx context.Context) {
+	canaries := []struct {
+		platform string
+		url      string
+	}{
+		{downloader.PlatformYouTube, CanaryYouTube},
+		{downloader.PlatformInstagram, CanaryInstagram},
+		{downloader.PlatformTikTok, CanaryTikTok},
+		{downloader.PlatformTwitter, CanaryTwitter},
+	}
+
+	for _, item := range canaries {
+		if ctx.Err() != nil {
+			return
+		}
+
+		cCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		m, err := j.dl.Chain().Resolve(cCtx, item.platform, item.url)
+		cancel()
+
+		if err == nil && m != nil && m.URL != "" {
+			_ = j.database.ClearPlatformFails(item.platform)
+			if disabled, dErr := j.database.DisabledPlatforms(); dErr == nil {
+				j.dl.SetDisabledPlatforms(disabled)
+			}
+		} else {
+			failErr := err
+			if failErr == nil {
+				failErr = fmt.Errorf("empty media returned")
+			}
+			GlobalLogBuffer.Append(fmt.Sprintf("Canary check failed for %s: %v", item.platform, failErr))
+			_ = j.database.RecordPlatformFailWithErr(item.platform, failErr)
+
+			if disabled, dErr := j.database.DisabledPlatforms(); dErr == nil {
+				j.dl.SetDisabledPlatforms(disabled)
+			}
+
+			health, hErr := j.database.GetPlatformHealth(item.platform)
+			if hErr == nil && health != nil && health.Fails >= 3 {
+				// Run pip install -U yt-dlp[default] once in background
+				go func(plat string, lastErr error) {
+					pipCtx, pipCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					defer pipCancel()
+					cmd := exec.CommandContext(pipCtx, "pip", "install", "-U", "yt-dlp[default]")
+					out, pErr := cmd.CombinedOutput()
+					if pErr != nil {
+						GlobalLogBuffer.Append(fmt.Sprintf("Canary auto-update pip error: %v", pErr))
+					} else {
+						GlobalLogBuffer.Append(fmt.Sprintf("Canary auto-update pip success: %s", strings.TrimSpace(string(out))))
+					}
+					_ = j.database.ClearPlatformFails(plat)
+					if disabled, dErr := j.database.DisabledPlatforms(); dErr == nil {
+						j.dl.SetDisabledPlatforms(disabled)
+					}
+				}(item.platform, failErr)
+
+				// Alert admins via Telegram
+				alertMsg := fmt.Sprintf("🚨 <b>Platform Canary Alert</b>\n\nPlatform <b>%s</b> has failed 3 consecutive health checks!\n\n<b>Error:</b> <code>%s</code>\n\nTriggering background <code>pip install -U yt-dlp[default]</code> and resetting fail counter.",
+					item.platform, htmlEscape(failErr.Error()))
+				for _, adminID := range j.cfg.AdminIDs {
+					_, _ = j.bot.SendMessage(adminID, alertMsg, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+				}
 			}
 		}
 	}

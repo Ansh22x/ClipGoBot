@@ -1,10 +1,12 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 
 	"tg-media-bot/internal/config"
 	"tg-media-bot/internal/db"
+	"tg-media-bot/internal/downloader"
 	"tg-media-bot/internal/license"
 )
 
@@ -55,14 +58,16 @@ func (rb *LogRingBuffer) Last(n int) []string {
 type AdminHandler struct {
 	cfg       *config.Config
 	database  *db.DB
+	dl        *downloader.Downloader
 	startTime time.Time
 }
 
 // NewAdminHandler creates a new AdminHandler
-func NewAdminHandler(cfg *config.Config, database *db.DB) *AdminHandler {
+func NewAdminHandler(cfg *config.Config, database *db.DB, dl *downloader.Downloader) *AdminHandler {
 	return &AdminHandler{
 		cfg:       cfg,
 		database:  database,
+		dl:        dl,
 		startTime: time.Now(),
 	}
 }
@@ -244,10 +249,37 @@ func (h *AdminHandler) HandleBan(b *gotgbot.Bot, ctx *ext.Context) error {
 	return err
 }
 
-// 5. /unban <user_id or @username> or reply to user message
+// 5. /unban <user_id or @username or platform> or reply to user message
 func (h *AdminHandler) HandleUnban(b *gotgbot.Bot, ctx *ext.Context) error {
 	msg := ctx.EffectiveMessage
 	args := ctx.Args()
+
+	// Platform unban check: /unban <youtube|instagram|tiktok|twitter|x>
+	if len(args) >= 2 {
+		platInput := strings.ToLower(strings.TrimSpace(args[1]))
+		var plat string
+		switch platInput {
+		case "youtube", "yt":
+			plat = "YouTube"
+		case "instagram", "ig":
+			plat = "Instagram"
+		case "tiktok", "tt":
+			plat = "TikTok"
+		case "twitter", "x":
+			plat = "Twitter"
+		}
+		if plat != "" {
+			_ = h.database.ClearPlatformFails(plat)
+			if h.dl != nil {
+				if disabled, err := h.database.DisabledPlatforms(); err == nil {
+					h.dl.SetDisabledPlatforms(disabled)
+				}
+			}
+			replyText := fmt.Sprintf("✅ <b>Platform Health Reset!</b>\n\nPlatform <code>%s</code> has been reset to OK and removed from disabled state.", plat)
+			_, err := msg.Reply(b, replyText, &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+			return err
+		}
+	}
 
 	var targetID int64
 	var targetUsername string
@@ -760,4 +792,94 @@ func maskProxy(p string) string {
 		return prefix[:colonIdx+1] + "****@" + host
 	}
 	return prefix + "@" + host
+}
+
+// 17. /diag: Displays platform health, resolver breaker state, yt-dlp version, and impersonation availability
+func (h *AdminHandler) HandleDiag(b *gotgbot.Bot, ctx *ext.Context) error {
+	msg := ctx.EffectiveMessage
+
+	// 1. Get yt-dlp version
+	ytdlpVer := "Unknown"
+	ytdlpPath := h.cfg.YtDlpPath
+	if ytdlpPath == "" {
+		ytdlpPath = "yt-dlp"
+	}
+	verCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(verCtx, ytdlpPath, "--version").Output(); err == nil {
+		ytdlpVer = strings.TrimSpace(string(out))
+	}
+
+	// 2. Impersonation availability
+	impersonateStatus := "❌ Unavailable"
+	if h.dl != nil && h.dl.CanImpersonateChrome() {
+		impersonateStatus = "✅ Working (chrome)"
+	}
+
+	// 3. Platform health records from DB
+	allHealth, err := h.database.GetAllPlatformHealth()
+	healthMap := make(map[string]db.PlatformHealthStatus)
+	if err == nil {
+		for _, ph := range allHealth {
+			healthMap[ph.Platform] = ph
+		}
+	}
+
+	platforms := []string{"YouTube", "Instagram", "TikTok", "Twitter"}
+	now := time.Now()
+
+	var sb strings.Builder
+	sb.WriteString("🩺 <b>System Diagnostics & Platform Health</b>\n\n")
+	sb.WriteString(fmt.Sprintf("⚙️ <b>yt-dlp Version:</b> <code>%s</code>\n", ytdlpVer))
+	sb.WriteString(fmt.Sprintf("🎭 <b>Impersonation:</b> %s\n", impersonateStatus))
+	if h.cfg.CobaltURL != "" {
+		sb.WriteString(fmt.Sprintf("⚡ <b>Cobalt API:</b> <code>%s</code>\n", h.cfg.CobaltURL))
+	}
+	sb.WriteString("\n📊 <b>Platforms:</b>\n")
+
+	for _, plat := range platforms {
+		ph, exists := healthMap[plat]
+		isDegraded := false
+		if exists && ph.DisabledUntil != nil && ph.DisabledUntil.After(now) {
+			isDegraded = true
+		}
+		if h.dl != nil && (h.dl.IsPlatformDisabled(plat) || h.dl.Chain().Broken(plat)) {
+			isDegraded = true
+		}
+
+		stateIcon := "🟢"
+		stateStr := "ok"
+		if isDegraded {
+			stateIcon = "🔴"
+			stateStr = "degraded"
+		}
+
+		sb.WriteString(fmt.Sprintf("\n%s <b>%s:</b> <code>%s</code>\n", stateIcon, plat, stateStr))
+		fails := 0
+		if exists {
+			fails = ph.Fails
+		}
+		sb.WriteString(fmt.Sprintf("• <b>Fail Count:</b> %d / 3\n", fails))
+
+		if exists && ph.DisabledUntil != nil && ph.DisabledUntil.After(now) {
+			remaining := time.Until(*ph.DisabledUntil).Round(time.Second)
+			sb.WriteString(fmt.Sprintf("• <b>Disabled Until:</b> %s (%s remaining)\n", ph.DisabledUntil.Format("15:04:05"), remaining.String()))
+		} else {
+			sb.WriteString("• <b>Disabled Until:</b> None\n")
+		}
+
+		lastErr := "None"
+		if exists && ph.LastError != "" {
+			lastErr = ph.LastError
+			if len(lastErr) > 80 {
+				lastErr = lastErr[:80] + "..."
+			}
+		}
+		sb.WriteString(fmt.Sprintf("• <b>Last Error:</b> <code>%s</code>\n", htmlEscape(lastErr)))
+	}
+
+	sb.WriteString("\n💡 <i>Use <code>/unban &lt;platform&gt;</code> to manually reset health.</i>")
+
+	_, sendErr := msg.Reply(b, sb.String(), &gotgbot.SendMessageOpts{ParseMode: "HTML"})
+	return sendErr
 }

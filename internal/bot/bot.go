@@ -67,6 +67,10 @@ func NewBotEngine(cfg *config.Config, database *db.DB) (*BotEngine, error) {
 
 	updater := ext.NewUpdater(dispatcher, nil)
 	dl := downloader.NewDownloader(cfg)
+	if disabled, err := database.DisabledPlatforms(); err == nil && len(disabled) > 0 {
+		dl.SetDisabledPlatforms(disabled)
+		log.Printf("[Bot Init] Loaded %d disabled platform(s) from database", len(disabled))
+	}
 
 	engine := &BotEngine{
 		cfg:        cfg,
@@ -84,7 +88,7 @@ func NewBotEngine(cfg *config.Config, database *db.DB) (*BotEngine, error) {
 func (e *BotEngine) registerHandlers() {
 	mw := NewMiddlewareManager(e.cfg, e.database)
 	userH := NewUserHandler(e.cfg, e.database, e.dl, mw)
-	adminH := NewAdminHandler(e.cfg, e.database)
+	adminH := NewAdminHandler(e.cfg, e.database, e.dl)
 
 	d := e.dispatcher
 
@@ -102,7 +106,8 @@ func (e *BotEngine) registerHandlers() {
 	// Callback query handler for VIP purchase requests
 	d.AddHandler(handlers.NewCallback(callbackquery.Prefix("buy_plan:"), userH.HandleBuyPlanCallback))
 
-	// 10 Admin Commands (wrapped in Admin authorization check)
+	// Admin Commands (wrapped in Admin authorization check)
+	d.AddHandler(handlers.NewCommand("diag", mw.RequireAdmin(adminH.HandleDiag)))
 	d.AddHandler(handlers.NewCommand("genkey", mw.RequireAdmin(adminH.HandleGenKey)))
 	d.AddHandler(handlers.NewCommand("revokekey", mw.RequireAdmin(adminH.HandleRevokeKey)))
 	d.AddHandler(handlers.NewCommand("listkeys", mw.RequireAdmin(adminH.HandleListKeys)))
@@ -175,6 +180,7 @@ func (e *BotEngine) registerTelegramCommands() {
 		{Command: "delcookies", Description: "[Admin] Delete active cookies.txt file"},
 		{Command: "setproxy", Description: "[Admin] Configure download proxy URL"},
 		{Command: "checkproxy", Description: "[Admin] Check active proxy status"},
+		{Command: "diag", Description: "[Admin] View platform health & diagnostics"},
 	}...)
 	_, _ = e.bot.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
 		Scope: gotgbot.BotCommandScopeAllChatAdministrators{},
@@ -193,7 +199,7 @@ func (e *BotEngine) Start(ctx context.Context) error {
 	e.registerTelegramCommands()
 
 	// Launch background jobs
-	jobs := NewBackgroundJobs(e.cfg, e.database, e.bot)
+	jobs := NewBackgroundJobs(e.cfg, e.database, e.bot, e.dl)
 	jobs.Start(ctx)
 
 	// Start long polling

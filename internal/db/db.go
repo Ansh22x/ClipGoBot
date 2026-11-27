@@ -125,6 +125,14 @@ func (db *DB) createSchema() error {
 		FOREIGN KEY(license_key) REFERENCES licenses(key)
 	);
 
+	CREATE TABLE IF NOT EXISTS platform_health (
+		platform TEXT PRIMARY KEY,
+		fails INTEGER DEFAULT 0,
+		last_fail DATETIME,
+		disabled_until DATETIME,
+		last_error TEXT
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(key);
 	CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
 	CREATE INDEX IF NOT EXISTS idx_downloads_telegram_id ON downloads(telegram_id);
