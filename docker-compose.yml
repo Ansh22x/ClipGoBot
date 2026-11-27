@@ -34,6 +34,11 @@ services:
       retries: 3
       start_period: 5s
 
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:latest
+    container_name: cobalt_service
+    restart: unless-stopped
+
   tg-downloader-bot:
     build:
       context: .
@@ -43,6 +48,7 @@ services:
     depends_on:
       - tg-bot-api
       - bgutil
+      - cobalt
     env_file:
       - .env
     volumes:
@@ -55,3 +61,4 @@ services:
       - TELEGRAM_UPLOAD_LIMIT_MB=1900
       - TG_API_BASE=http://tg-bot-api:8081
       - POT_PROVIDER_URL=http://bgutil:4416
+      - COBALT_URL=http://cobalt:9000
