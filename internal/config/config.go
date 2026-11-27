@@ -25,6 +25,11 @@ type Config struct {
 	FFmpegPath             string
 	LogLevel               string
 	ProxyURL               string
+	CobaltURL              string
+	ProxyYouTube           string
+	ProxyInstagram         string
+	ProxyX                 string
+	ProxyTikTok            string
 	adminMap               map[int64]struct{}
 	mu                     sync.RWMutex
 }
@@ -41,6 +46,7 @@ func LoadConfig() (*Config, error) {
 	maxConcurrent := getEnvInt("MAX_CONCURRENT_DOWNLOADS", 4)
 	tgAPIBase := getEnv("TG_API_BASE", getEnv("TELEGRAM_API_BASE", "http://tg-bot-api:8081"))
 	potURL := getEnv("POT_PROVIDER_URL", getEnv("BGUTIL_URL", "http://bgutil:4416"))
+	cobaltURL := getEnv("COBALT_URL", "http://cobalt:9000")
 
 	// Default to 1900MB for local Bot API, or 50MB for official cloud API
 	defaultUploadMB := 1900
@@ -55,6 +61,10 @@ func LoadConfig() (*Config, error) {
 	ffmpegPath := getEnv("FFMPEG_PATH", "ffmpeg")
 	logLevel := getEnv("LOG_LEVEL", "INFO")
 	proxyURL := getEnv("YTDLP_PROXY", getEnv("PROXY", getEnv("HTTP_PROXY", "")))
+	proxyYouTube := getEnv("PROXY_YOUTUBE", proxyURL)
+	proxyInstagram := getEnv("PROXY_INSTAGRAM", proxyURL)
+	proxyX := getEnv("PROXY_X", proxyURL)
+	proxyTikTok := getEnv("PROXY_TIKTOK", proxyURL)
 
 	adminIDs := parseAdminIDs(adminIDsStr)
 	adminMap := make(map[int64]struct{}, len(adminIDs))
@@ -71,12 +81,17 @@ func LoadConfig() (*Config, error) {
 		TelegramUploadLimitMB:  uploadLimitMB,
 		TelegramAPIBase:        tgAPIBase,
 		PotProviderURL:         potURL,
+		CobaltURL:              cobaltURL,
 		FreeDailyQuota:         freeDailyQuota,
 		RateLimitCooldownSec:   rateLimitSec,
 		YtDlpPath:              ytDlpPath,
 		FFmpegPath:             ffmpegPath,
 		LogLevel:               logLevel,
 		ProxyURL:               proxyURL,
+		ProxyYouTube:           proxyYouTube,
+		ProxyInstagram:         proxyInstagram,
+		ProxyX:                 proxyX,
+		ProxyTikTok:            proxyTikTok,
 		adminMap:               adminMap,
 	}
 
@@ -95,6 +110,32 @@ func (c *Config) IsAdmin(userID int64) bool {
 func (c *Config) GetProxyURL() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.ProxyURL
+}
+
+// ProxyFor thread-safely returns the proxy URL configured for a specific platform,
+// falling back to the default ProxyURL.
+func (c *Config) ProxyFor(platform string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case "youtube":
+		if c.ProxyYouTube != "" {
+			return c.ProxyYouTube
+		}
+	case "instagram":
+		if c.ProxyInstagram != "" {
+			return c.ProxyInstagram
+		}
+	case "twitter", "x", "twitter/x":
+		if c.ProxyX != "" {
+			return c.ProxyX
+		}
+	case "tiktok":
+		if c.ProxyTikTok != "" {
+			return c.ProxyTikTok
+		}
+	}
 	return c.ProxyURL
 }
 
