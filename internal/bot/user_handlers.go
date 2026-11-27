@@ -556,7 +556,13 @@ func (h *UserHandler) HandleRawLink(b *gotgbot.Bot, ctx *ext.Context) error {
 	if err != nil {
 		rawErr := err.Error()
 		var errMsg string
-		if strings.Contains(rawErr, "Sign in to confirm you’re not a bot") || strings.Contains(rawErr, "Sign in to confirm") {
+		if strings.Contains(rawErr, "ERR_PLATFORM_DEGRADED") {
+			errMsg = ErrPlatformDegraded
+		} else if strings.Contains(rawErr, "ERR_IG_AUTH") {
+			errMsg = ErrIgAuth
+		} else if strings.Contains(rawErr, "ERR_IG_RATE_LIMIT") {
+			errMsg = ErrIgRateLimit
+		} else if strings.Contains(rawErr, "Sign in to confirm you’re not a bot") || strings.Contains(rawErr, "Sign in to confirm") {
 			errMsg = "❌ <b>YouTube Anti-Bot Check:</b> YouTube blocked this server request asking for sign-in. Try another video or contact admin to provide cookies.txt."
 		} else if strings.Contains(rawErr, "Video unavailable") || strings.Contains(rawErr, "Private video") {
 			errMsg = "❌ <b>Video Unavailable:</b> This video is private, deleted, or region-restricted."

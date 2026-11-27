@@ -12,9 +12,12 @@ const (
 	ErrInvalidKey        = "🔑 Invalid or non-existent license key. Please check and try again."
 	ErrKeyExpired        = "⏰ This license key has expired or has already been redeemed."
 	ErrAlreadyDownloading = "🔄 You already have an active download in progress. Use /cancel to abort it."
-	ErrCancelled         = "🛑 Download process was cancelled."
-	ErrInternalServer    = "💥 An internal server error occurred while processing your request. Please try again later."
-	ErrDiagnostic        = "❌ Download failed. Diagnostic information recorded."
+	ErrCancelled          = "🛑 Download process was cancelled."
+	ErrInternalServer     = "💥 An internal server error occurred while processing your request. Please try again later."
+	ErrDiagnostic         = "❌ Download failed. Diagnostic information recorded."
+	ErrPlatformDegraded   = "⚠️ This platform is temporarily unavailable. Try again in a few minutes or send a link from another platform."
+	ErrIgAuth             = "🔒 Instagram requires authentication. Please try another link or contact admin."
+	ErrIgRateLimit        = "⏳ Instagram rate limit reached. Please try again in a few minutes."
 )
 
 // ResolveErrorMessage converts an error code or message to user-facing string
@@ -22,6 +25,12 @@ func ResolveErrorMessage(errStr string) string {
 	switch errStr {
 	case "ERR_DIAGNOSTIC":
 		return ErrDiagnostic
+	case "ERR_PLATFORM_DEGRADED":
+		return ErrPlatformDegraded
+	case "ERR_IG_AUTH":
+		return ErrIgAuth
+	case "ERR_IG_RATE_LIMIT":
+		return ErrIgRateLimit
 	case "ERR_INVALID_URL":
 		return ErrInvalidURL
 	case "ERR_RATE_LIMITED":
