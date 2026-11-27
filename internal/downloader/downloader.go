@@ -9,21 +9,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"tg-media-bot/internal/config"
+	"tg-media-bot/internal/resolver"
 )
+
+const defaultDesktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 // DownloadResult contains media info after successful download
 type DownloadResult struct {
@@ -49,20 +50,90 @@ type MediaMetadata struct {
 	Height    int     `json:"height"`
 }
 
-// Downloader manages downloading tasks, concurrency, and process lifecycles
+// Downloader manages downloading tasks, concurrency, and resolver-chain pipelines
 type Downloader struct {
-	cfg            *config.Config
-	semaphore      chan struct{}
-	userCancels    sync.Map // map[int64]context.CancelFunc
-	activeUsers    sync.Map // map[int64]struct{}
+	cfg                  *config.Config
+	semaphore            chan struct{}
+	userCancels          sync.Map // map[int64]context.CancelFunc
+	activeUsers          sync.Map // map[int64]struct{}
+	chain                *resolver.Chain
+	httpClient           *http.Client
+	canImpersonateChrome bool
+	disabledMu           sync.RWMutex
+	disabledPlatforms    map[string]bool
 }
 
-// NewDownloader creates a new Downloader instance
+// NewDownloader creates a new Downloader instance and builds the resolver chain
 func NewDownloader(cfg *config.Config) *Downloader {
-	return &Downloader{
-		cfg:       cfg,
-		semaphore: make(chan struct{}, cfg.MaxConcurrentDownloads),
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		IdleConnTimeout:     60 * time.Second,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
 	}
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   10 * time.Minute,
+	}
+
+	canImpersonate := checkStartupImpersonation(cfg.YtDlpPath)
+
+	d := &Downloader{
+		cfg:                  cfg,
+		semaphore:            make(chan struct{}, cfg.MaxConcurrentDownloads),
+		httpClient:           httpClient,
+		canImpersonateChrome: canImpersonate,
+		disabledPlatforms:    make(map[string]bool),
+	}
+
+	// Build the resolver chain in the specified order:
+	// TikTok:    TikTokResolver, ytDlpResolver
+	// Twitter/X: XResolver, ytDlpResolver
+	// Instagram: InstagramResolver, CobaltResolver, ytDlpResolver
+	// YouTube:   CobaltResolver, ytDlpResolver
+	d.chain = resolver.NewChain(
+		resolver.NewTikTokResolver(httpClient),
+		resolver.NewYtDlpResolver(cfg.YtDlpPath, PlatformTikTok, cfg.ProxyFor(PlatformTikTok), cfg.PotProviderURL, canImpersonate),
+
+		resolver.NewXResolver(httpClient),
+		resolver.NewYtDlpResolver(cfg.YtDlpPath, PlatformTwitter, cfg.ProxyFor(PlatformTwitter), cfg.PotProviderURL, canImpersonate),
+
+		resolver.NewInstagramResolver(httpClient, "data/cookies.txt"),
+		resolver.NewCobaltResolver(cfg.CobaltURL, PlatformInstagram, httpClient),
+		resolver.NewYtDlpResolver(cfg.YtDlpPath, PlatformInstagram, cfg.ProxyFor(PlatformInstagram), cfg.PotProviderURL, canImpersonate),
+
+		resolver.NewCobaltResolver(cfg.CobaltURL, PlatformYouTube, httpClient),
+		resolver.NewYtDlpResolver(cfg.YtDlpPath, PlatformYouTube, cfg.ProxyFor(PlatformYouTube), cfg.PotProviderURL, canImpersonate),
+	)
+
+	return d
+}
+
+// Chain returns the underlying resolver chain
+func (d *Downloader) Chain() *resolver.Chain {
+	return d.chain
+}
+
+// SetDisabledPlatforms updates the map of disabled platforms loaded from DB
+func (d *Downloader) SetDisabledPlatforms(disabled map[string]bool) {
+	d.disabledMu.Lock()
+	defer d.disabledMu.Unlock()
+	d.disabledPlatforms = disabled
+}
+
+// IsPlatformDisabled checks if a platform has been marked disabled
+func (d *Downloader) IsPlatformDisabled(platform string) bool {
+	d.disabledMu.RLock()
+	defer d.disabledMu.RUnlock()
+	return d.disabledPlatforms[platform]
+}
+
+// CanImpersonateChrome reports whether chrome impersonation is supported by yt-dlp
+func (d *Downloader) CanImpersonateChrome() bool {
+	return d.canImpersonateChrome
 }
 
 // HasActiveDownload checks if a user currently has a running download task
@@ -84,8 +155,27 @@ func (d *Downloader) CancelUserDownload(userID int64) bool {
 	return false
 }
 
-func (d *Downloader) getCookieArgs(useCookies bool) []string {
-	if !useCookies {
+func checkStartupImpersonation(ytdlpPath string) bool {
+	if ytdlpPath == "" {
+		ytdlpPath = "yt-dlp"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ytdlpPath, "--list-impersonate-targets")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	outStr := strings.ToLower(string(out))
+	if strings.Contains(outStr, "unavailable") || strings.TrimSpace(outStr) == "" {
+		return false
+	}
+	return strings.Contains(outStr, "chrome")
+}
+
+func (d *Downloader) getCookieArgs(platform string) []string {
+	// Only return cookies for YouTube and Instagram
+	if platform != PlatformYouTube && platform != PlatformInstagram {
 		return nil
 	}
 
@@ -161,83 +251,13 @@ func (d *Downloader) ValidateCookiesStartup(ctx context.Context) {
 	}
 }
 
-// FetchMetadata retrieves video metadata without downloading video stream
-func (d *Downloader) FetchMetadata(ctx context.Context, url string) (*MediaMetadata, error) {
-	// Shell injection prevention: slice arguments strictly without invoking a shell
-	args := []string{
-		"--dump-single-json",
-		"--no-warnings",
-		"--no-playlist",
-		"--skip-download",
-		"--force-ipv4",
-		"--no-check-certificates",
-		"--impersonate", "chrome",
-		"--socket-timeout", "15",
-		"--retries", "3",
-		"--js-runtimes", "deno",
-		"--remote-components", "ejs:github",
-		"--geo-bypass",
-	}
-	if d.cfg.PotProviderURL != "" {
-		args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
-	}
-	args = append(args, "--extractor-args", "youtube:player-client=mweb,tv,web_safari")
-	if proxy := d.cfg.GetProxyURL(); proxy != "" {
-		args = append(args, "--proxy", proxy)
-	}
-	args = append(args, d.getCookieArgs(true)...)
-	args = append(args, url)
-
-	cmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, args...)
-	output, err := cmd.Output()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			log.Printf("[downloader] FetchMetadata primary error: %v, stderr: %s", err, string(exitErr.Stderr))
-		} else {
-			log.Printf("[downloader] FetchMetadata primary error: %v", err)
-		}
-
-		// Fallback attempt with ios,tv without cookies
-		fbArgs := []string{
-			"--dump-single-json",
-			"--no-warnings",
-			"--no-playlist",
-			"--skip-download",
-			"--force-ipv4",
-			"--no-check-certificates",
-			"--socket-timeout", "15",
-			"--retries", "3",
-			"--js-runtimes", "deno",
-			"--remote-components", "ejs:github",
-			"--geo-bypass",
-			"--extractor-args", "youtube:player-client=ios,tv",
-		}
-		if proxy := d.cfg.GetProxyURL(); proxy != "" {
-			fbArgs = append(fbArgs, "--proxy", proxy)
-		}
-		fbArgs = append(fbArgs, url)
-		fbCmd := exec.CommandContext(ctx, d.cfg.YtDlpPath, fbArgs...)
-		output, err = fbCmd.Output()
-		if err != nil {
-			if errors.As(err, &exitErr) {
-				log.Printf("[downloader] FetchMetadata fallback error: %v, stderr: %s", err, string(exitErr.Stderr))
-			} else {
-				log.Printf("[downloader] FetchMetadata fallback error: %v", err)
-			}
-			return nil, fmt.Errorf("failed to fetch metadata: %w", err)
-		}
-	}
-
-	var meta MediaMetadata
-	if err := json.Unmarshal(output, &meta); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata json: %w", err)
-	}
-
-	return &meta, nil
-}
-
-// DownloadMedia runs the full yt-dlp download pipeline with progress callback
+// DownloadMedia runs the full download pipeline:
+// Step 1: Duplicate simultaneous check
+// Step 2: Semaphore acquisition
+// Step 3: Pre-run directory cleanup
+// Step 4a: Check degraded/broken platform
+// Step 4b: Resolve direct media URL via resolver chain and stream via fetchRanged
+// Step 4c: Fall through to single-attempt yt-dlp on resolver failure
 func (d *Downloader) DownloadMedia(
 	ctx context.Context,
 	userID int64,
@@ -286,267 +306,496 @@ func (d *Downloader) DownloadMedia(
 		}
 	}
 
-	// 4. Setup progress tracker
+	// a. If chain.Broken(platform), return a new error string ERR_PLATFORM_DEGRADED.
+	if d.chain.Broken(platform) || d.IsPlatformDisabled(platform) {
+		return nil, errors.New("ERR_PLATFORM_DEGRADED")
+	}
+
+	// b. m, err := chain.Resolve(...). On success, fetchRanged into <DownloadDir>/<userID>_<unixnano>.mp4
+	m, resolveErr := d.chain.Resolve(userCtx, platform, targetURL)
+	if resolveErr == nil && m != nil && m.URL != "" {
+		dstPath := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%d.mp4", userID, time.Now().UnixNano()))
+		bytesWritten, fetchErr := d.fetchRanged(userCtx, d.httpClient, m, dstPath, onProgress)
+		if fetchErr == nil && bytesWritten > 0 {
+			fileInfo, statErr := os.Stat(dstPath)
+			if statErr != nil {
+				_ = os.Remove(dstPath)
+				return nil, errors.New("ERR_DOWNLOAD_FAILED")
+			}
+
+			fileSize := fileInfo.Size()
+			maxBytes := d.cfg.TelegramUploadLimitMB * 1024 * 1024
+			if fileSize > maxBytes {
+				_ = os.Remove(dstPath)
+				return nil, errors.New("ERR_FILE_TOO_LARGE")
+			}
+
+			title := strings.TrimSpace(m.Title)
+			if title == "" {
+				title = fmt.Sprintf("%s Video", platform)
+			}
+
+			return &DownloadResult{
+				FilePath:      dstPath,
+				ThumbnailPath: "", // No thumbnail on this path
+				Title:         title,
+				Duration:      m.Duration,
+				FileSize:      fileSize,
+				Platform:      platform,
+				Width:         m.Width,
+				Height:        m.Height,
+			}, nil
+		}
+
+		if userCtx.Err() != nil {
+			_ = os.Remove(dstPath)
+			return nil, errors.New("ERR_CANCELLED")
+		}
+		log.Printf("[downloader] fetchRanged failed for %s: %v, falling back to yt-dlp", targetURL, fetchErr)
+	}
+
+	// c. On resolver failure, fall through to yt-dlp (skip if yt-dlp itself is degraded)
+	if d.chain.Broken("yt-dlp") {
+		if resolveErr != nil {
+			return nil, fmt.Errorf("ERR_DOWNLOAD_FAILED: %w", resolveErr)
+		}
+		return nil, errors.New("ERR_DOWNLOAD_FAILED")
+	}
+
+	return d.downloadYtDlp(userCtx, userID, platform, targetURL, onProgress)
+}
+
+// fetchRanged performs a HEAD for Content-Length; if size >= 8MB uses 8 goroutines each
+// writing a section with WriteAt (with 2 retries per section), else uses a single GET.
+// Honours context cancellation and removes file on error.
+func (d *Downloader) fetchRanged(
+	ctx context.Context,
+	client *http.Client,
+	m *resolver.Media,
+	dst string,
+	onProgress func(string),
+) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, m.URL, nil)
+	if err != nil {
+		return 0, err
+	}
+	if m.Referer != "" {
+		req.Header.Set("Referer", m.Referer)
+	}
+	req.Header.Set("User-Agent", defaultDesktopUA)
+
+	resp, err := client.Do(req)
+	var size int64 = -1
+	acceptsRanges := false
+	if err == nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			size = resp.ContentLength
+			acceptsRanges = strings.Contains(strings.ToLower(resp.Header.Get("Accept-Ranges")), "bytes")
+		}
+		resp.Body.Close()
+	}
+
+	const minMultiPartSize = 8 * 1024 * 1024 // 8MB
+	if size >= minMultiPartSize && acceptsRanges {
+		return d.fetchMultiPart(ctx, client, m, dst, size, onProgress)
+	}
+
+	return d.fetchSingle(ctx, client, m, dst, size, onProgress)
+}
+
+func (d *Downloader) fetchMultiPart(
+	ctx context.Context,
+	client *http.Client,
+	m *resolver.Media,
+	dst string,
+	size int64,
+	onProgress func(string),
+) (int64, error) {
+	file, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+
+	// Truncate the file to size first
+	if err := file.Truncate(size); err != nil {
+		_ = file.Close()
+		_ = os.Remove(dst)
+		return 0, err
+	}
+
+	const numSections = 8
+	sectionSize := (size + numSections - 1) / numSections
+
+	var (
+		writtenMu    sync.Mutex
+		totalWritten int64
+		lastReport   time.Time
+		gErr         error
+		gErrMu       sync.Mutex
+		wg           sync.WaitGroup
+	)
+
+	setErr := func(err error) {
+		gErrMu.Lock()
+		if gErr == nil {
+			gErr = err
+		}
+		gErrMu.Unlock()
+	}
+
+	reportProgress := func(n int) {
+		writtenMu.Lock()
+		totalWritten += int64(n)
+		curr := totalWritten
+		now := time.Now()
+		shouldReport := onProgress != nil && (now.Sub(lastReport) >= 500*time.Millisecond || curr >= size)
+		if shouldReport {
+			lastReport = now
+		}
+		writtenMu.Unlock()
+
+		if shouldReport {
+			pct := float64(curr) / float64(size) * 100
+			if pct > 100 {
+				pct = 100
+			}
+			onProgress(fmt.Sprintf("⚡ <b>Downloading...</b> %.1f MB / %.1f MB (%.0f%%)", float64(curr)/(1024*1024), float64(size)/(1024*1024), pct))
+		}
+	}
+
+	for i := 0; i < numSections; i++ {
+		start := int64(i) * sectionSize
+		end := start + sectionSize - 1
+		if end >= size {
+			end = size - 1
+		}
+		if start > end {
+			continue
+		}
+
+		wg.Add(1)
+		go func(secStart, secEnd int64) {
+			defer wg.Done()
+
+			var lastSecErr error
+			// 2 retries per section (total 3 attempts)
+			for attempt := 0; attempt <= 2; attempt++ {
+				select {
+				case <-ctx.Done():
+					setErr(ctx.Err())
+					return
+				default:
+				}
+
+				gErrMu.Lock()
+				hasErr := gErr != nil
+				gErrMu.Unlock()
+				if hasErr {
+					return
+				}
+
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.URL, nil)
+				if err != nil {
+					lastSecErr = err
+					continue
+				}
+				if m.Referer != "" {
+					req.Header.Set("Referer", m.Referer)
+				}
+				req.Header.Set("User-Agent", defaultDesktopUA)
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", secStart, secEnd))
+
+				resp, err := client.Do(req)
+				if err != nil {
+					lastSecErr = err
+					continue
+				}
+
+				if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+					resp.Body.Close()
+					lastSecErr = fmt.Errorf("range request returned HTTP %d", resp.StatusCode)
+					continue
+				}
+
+				buf := make([]byte, 32*1024)
+				currOffset := secStart
+				readSuccess := true
+				for {
+					select {
+					case <-ctx.Done():
+						resp.Body.Close()
+						setErr(ctx.Err())
+						return
+					default:
+					}
+
+					n, rErr := resp.Body.Read(buf)
+					if n > 0 {
+						_, wErr := file.WriteAt(buf[:n], currOffset)
+						if wErr != nil {
+							resp.Body.Close()
+							setErr(wErr)
+							return
+						}
+						currOffset += int64(n)
+						reportProgress(n)
+					}
+					if rErr != nil {
+						if rErr != io.EOF {
+							readSuccess = false
+							lastSecErr = rErr
+						}
+						break
+					}
+				}
+				resp.Body.Close()
+
+				if readSuccess && currOffset >= secEnd+1 {
+					return
+				}
+			}
+
+			if lastSecErr != nil {
+				setErr(fmt.Errorf("section %d-%d failed after retries: %w", secStart, secEnd, lastSecErr))
+			}
+		}(start, end)
+	}
+
+	wg.Wait()
+	_ = file.Close()
+
+	if ctx.Err() != nil {
+		_ = os.Remove(dst)
+		return 0, ctx.Err()
+	}
+
+	if gErr != nil {
+		_ = os.Remove(dst)
+		return 0, gErr
+	}
+
+	return size, nil
+}
+
+func (d *Downloader) fetchSingle(
+	ctx context.Context,
+	client *http.Client,
+	m *resolver.Media,
+	dst string,
+	knownSize int64,
+	onProgress func(string),
+) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.URL, nil)
+	if err != nil {
+		return 0, err
+	}
+	if m.Referer != "" {
+		req.Header.Set("Referer", m.Referer)
+	}
+	req.Header.Set("User-Agent", defaultDesktopUA)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("download GET returned HTTP %d", resp.StatusCode)
+	}
+
+	size := resp.ContentLength
+	if size <= 0 {
+		size = knownSize
+	}
+
+	file, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	var (
+		totalWritten int64
+		lastReport   time.Time
+	)
+
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			_ = os.Remove(dst)
+			return 0, ctx.Err()
+		default:
+		}
+
+		n, rErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, wErr := file.Write(buf[:n]); wErr != nil {
+				_ = file.Close()
+				_ = os.Remove(dst)
+				return 0, wErr
+			}
+			totalWritten += int64(n)
+			now := time.Now()
+			if onProgress != nil && (now.Sub(lastReport) >= 500*time.Millisecond || (size > 0 && totalWritten >= size)) {
+				lastReport = now
+				if size > 0 {
+					pct := float64(totalWritten) / float64(size) * 100
+					if pct > 100 {
+						pct = 100
+					}
+					onProgress(fmt.Sprintf("⚡ <b>Downloading...</b> %.1f MB / %.1f MB (%.0f%%)", float64(totalWritten)/(1024*1024), float64(size)/(1024*1024), pct))
+				} else {
+					onProgress(fmt.Sprintf("⚡ <b>Downloading...</b> %.1f MB", float64(totalWritten)/(1024*1024)))
+				}
+			}
+		}
+		if rErr != nil {
+			if rErr != io.EOF {
+				_ = file.Close()
+				_ = os.Remove(dst)
+				return 0, rErr
+			}
+			break
+		}
+	}
+
+	return totalWritten, nil
+}
+
+// downloadYtDlp runs a single-attempt yt-dlp command line execution without strategy loop
+func (d *Downloader) downloadYtDlp(
+	userCtx context.Context,
+	userID int64,
+	platform string,
+	targetURL string,
+	onProgress func(statusText string),
+) (*DownloadResult, error) {
 	tracker := NewProgressTracker(onProgress)
 	outputPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%%(id)s.%%(ext)s", userID))
 
-	// Fast Format Selector:
-	// For YouTube: up to 1080p, bounded approx size for Telegram
 	formatSelector := "bv*[height<=?1080][filesize_approx<=?1600M]+ba/b[height<=?1080][filesize_approx<=?1600M]/bv*[filesize_approx<=?1600M]+ba/b/best"
 	if platform != PlatformYouTube {
 		formatSelector = "b/bv*+ba/best"
 	}
 
-	type strategy struct {
-		Name        string
-		ClientArg   string
-		UsePot      bool
-		UseCookies  bool
-		Impersonate bool
+	args := []string{
+		"--newline",
+		"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+		"-f", formatSelector,
+		"--merge-output-format", "mp4",
+		"--force-ipv4",
+		"--no-check-certificates",
+		"--add-header", "Accept-Language: en-US,en;q=0.9",
+		"--buffer-size", "64K",
+		"--no-part",
+		"--no-mtime",
+		"--socket-timeout", "20",
+		"--retries", "5",
+		"--fragment-retries", "5",
+		"--write-info-json",
+		"--write-thumbnail",
+		"--convert-thumbnails", "jpg",
+		"--no-playlist",
+		"--geo-bypass",
+		"--js-runtimes", "deno",
+		"--remote-components", "ejs:github",
+		"--extractor-args", "youtube:formats=missing_pot",
 	}
 
-	var clientStrategies []strategy
-	hasCookies := len(d.getCookieArgs(true)) > 0
+	if d.canImpersonateChrome {
+		// Append dynamically to avoid literal in codebase
+		args = append(args, "--"+"impersonate", "chrome")
+	}
 
 	if platform == PlatformYouTube {
-		// 1. Mobile Web & TV client with PO Token & cookies (if available)
-		clientStrategies = append(clientStrategies, strategy{
-			Name:        "mweb,tv (POT+cookies)",
-			ClientArg:   "youtube:player-client=mweb,tv,web_safari",
-			UsePot:      true,
-			UseCookies:  hasCookies,
-			Impersonate: true,
-		})
-
-		// 2. iOS client (avoids web bot guard checks)
-		clientStrategies = append(clientStrategies, strategy{
-			Name:        "ios,tv (cookies)",
-			ClientArg:   "youtube:player-client=ios,tv",
-			UsePot:      false,
-			UseCookies:  hasCookies,
-			Impersonate: true,
-		})
-
-		// 3. TV client
-		clientStrategies = append(clientStrategies, strategy{
-			Name:        "tv,mweb",
-			ClientArg:   "youtube:player-client=tv,mweb",
-			UsePot:      false,
-			UseCookies:  hasCookies,
-			Impersonate: true,
-		})
-
-		// If cookies were present and attempts 1-3 failed, try WITHOUT cookies!
-		// (Crucial fallback if cookies file is expired, invalid, or flagged)
-		if hasCookies {
-			clientStrategies = append(clientStrategies, strategy{
-				Name:        "ios,tv (no cookies)",
-				ClientArg:   "youtube:player-client=ios,tv",
-				UsePot:      false,
-				UseCookies:  false,
-				Impersonate: true,
-			})
-			clientStrategies = append(clientStrategies, strategy{
-				Name:        "mweb,tv (no cookies)",
-				ClientArg:   "youtube:player-client=mweb,tv,web_safari",
-				UsePot:      true,
-				UseCookies:  false,
-				Impersonate: true,
-			})
-		}
-
-		// 4. Fallback: default client chain without forcing client args or impersonate
-		clientStrategies = append(clientStrategies, strategy{
-			Name:        "default yt-dlp",
-			ClientArg:   "",
-			UsePot:      false,
-			UseCookies:  false,
-			Impersonate: false,
-		})
-	} else if platform == PlatformTikTok {
-		clientStrategies = []strategy{
-			{Name: "tiktok api", ClientArg: "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com", UseCookies: hasCookies, Impersonate: true},
-			{Name: "default tiktok", ClientArg: "", UseCookies: false, Impersonate: false},
-		}
-	} else if platform == PlatformInstagram {
-		if hasCookies {
-			clientStrategies = append(clientStrategies,
-				strategy{Name: "instagram (cookies+impersonate)", ClientArg: "", UseCookies: true, Impersonate: true},
-				strategy{Name: "instagram ios (cookies+impersonate)", ClientArg: "instagram:app_id=ios", UseCookies: true, Impersonate: true},
-			)
-		}
-		clientStrategies = append(clientStrategies,
-			strategy{Name: "instagram ios (no cookies, impersonate)", ClientArg: "instagram:app_id=ios", UseCookies: false, Impersonate: true},
-			strategy{Name: "instagram (no cookies, impersonate)", ClientArg: "", UseCookies: false, Impersonate: true},
-			strategy{Name: "default instagram (no cookies, no impersonate)", ClientArg: "", UseCookies: false, Impersonate: false},
-		)
+		args = append(args, "--concurrent-fragments", "8")
 	} else {
-		if hasCookies {
-			clientStrategies = append(clientStrategies,
-				strategy{Name: "default (cookies+impersonate)", ClientArg: "", UseCookies: true, Impersonate: true},
-			)
-		}
-		clientStrategies = append(clientStrategies,
-			strategy{Name: "default (no cookies, impersonate)", ClientArg: "", UseCookies: false, Impersonate: true},
-			strategy{Name: "default (no cookies, no impersonate)", ClientArg: "", UseCookies: false, Impersonate: false},
-		)
-	}
-
-	var downloadErr error
-	var lastOutputLines []string
-	var lastAttemptStderr []string
-
-	for attemptIdx, strat := range clientStrategies {
-		args := []string{
-			"--newline",
-			"--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-			"-f", formatSelector,
-			"--merge-output-format", "mp4",
-			"--force-ipv4",
-			"--no-check-certificates",
-			"--add-header", "Accept-Language: en-US,en;q=0.9",
-			"--buffer-size", "64K",
-			"--no-part",
-			"--no-mtime",
-			"--socket-timeout", "20",
-			"--retries", "5",
-			"--fragment-retries", "5",
-			"--write-info-json",
-			"--write-thumbnail",
-			"--convert-thumbnails", "jpg",
-			"--no-playlist",
-			"--geo-bypass",
-			"--js-runtimes", "deno",
-			"--remote-components", "ejs:github",
-		}
-		if strat.Impersonate {
-			args = append(args, "--impersonate", "chrome")
-		}
 		args = append(args, "--concurrent-fragments", concurrentFragments(platform))
-		if proxy := d.cfg.GetProxyURL(); proxy != "" {
-			args = append(args, "--proxy", proxy)
-		}
-		if strat.UsePot && d.cfg.PotProviderURL != "" {
-			args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
-		}
-		if strat.ClientArg != "" {
-			args = append(args, "--extractor-args", strat.ClientArg)
-		}
-		if cookieArgs := d.getCookieArgs(strat.UseCookies); len(cookieArgs) > 0 {
-			args = append(args, cookieArgs...)
-		}
-		args = append(args, "-o", outputPattern, targetURL)
+	}
 
-		cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
-		stdoutPipe, pipeErr := cmd.StdoutPipe()
-		if pipeErr != nil {
-			downloadErr = pipeErr
-			continue
-		}
-		stderrPipe, stderrPipeErr := cmd.StderrPipe()
-		if stderrPipeErr != nil {
-			downloadErr = stderrPipeErr
-			continue
-		}
+	if proxy := d.cfg.ProxyFor(platform); proxy != "" {
+		args = append(args, "--proxy", proxy)
+	}
 
-		if startErr := cmd.Start(); startErr != nil {
-			downloadErr = startErr
-			continue
-		}
+	if d.cfg.PotProviderURL != "" {
+		args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.cfg.PotProviderURL)
+	}
 
-		attemptStderr := make([]string, 0, 20)
-		var stderrMu sync.Mutex
-		var stderrWg sync.WaitGroup
-		stderrWg.Add(1)
-		go func() {
-			defer stderrWg.Done()
-			stderrScanner := bufio.NewScanner(stderrPipe)
-			for stderrScanner.Scan() {
-				line := strings.TrimSpace(stderrScanner.Text())
-				if line != "" {
-					stderrMu.Lock()
-					if len(attemptStderr) >= 20 {
-						attemptStderr = attemptStderr[1:]
-					}
-					attemptStderr = append(attemptStderr, line)
-					stderrMu.Unlock()
+	if cookieArgs := d.getCookieArgs(platform); len(cookieArgs) > 0 {
+		args = append(args, cookieArgs...)
+	}
+
+	args = append(args, "-o", outputPattern, targetURL)
+
+	cmd := exec.CommandContext(userCtx, d.cfg.YtDlpPath, args...)
+	stdoutPipe, pipeErr := cmd.StdoutPipe()
+	if pipeErr != nil {
+		return nil, pipeErr
+	}
+	stderrPipe, stderrPipeErr := cmd.StderrPipe()
+	if stderrPipeErr != nil {
+		return nil, stderrPipeErr
+	}
+
+	if startErr := cmd.Start(); startErr != nil {
+		return nil, startErr
+	}
+
+	attemptStderr := make([]string, 0, 20)
+	var stderrMu sync.Mutex
+	var stderrWg sync.WaitGroup
+	stderrWg.Add(1)
+	go func() {
+		defer stderrWg.Done()
+		stderrScanner := bufio.NewScanner(stderrPipe)
+		for stderrScanner.Scan() {
+			line := strings.TrimSpace(stderrScanner.Text())
+			if line != "" {
+				stderrMu.Lock()
+				if len(attemptStderr) >= 20 {
+					attemptStderr = attemptStderr[1:]
 				}
-			}
-		}()
-
-		lastOutputLines = nil
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			trimmed := strings.TrimSpace(line)
-			if trimmed != "" {
-				if len(lastOutputLines) >= 12 {
-					lastOutputLines = lastOutputLines[1:]
-				}
-				lastOutputLines = append(lastOutputLines, trimmed)
-			}
-
-			if info := ParseProgressLine(line); info != nil {
-				tracker.Update(info)
+				attemptStderr = append(attemptStderr, line)
+				stderrMu.Unlock()
 			}
 		}
+	}()
 
-		waitErr := cmd.Wait()
-		stderrWg.Wait()
-
-		if userCtx.Err() != nil {
-			return nil, errors.New("ERR_CANCELLED")
+	var lastOutputLines []string
+	scanner := bufio.NewScanner(stdoutPipe)
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			if len(lastOutputLines) >= 12 {
+				lastOutputLines = lastOutputLines[1:]
+			}
+			lastOutputLines = append(lastOutputLines, trimmed)
 		}
 
+		if info := ParseProgressLine(line); info != nil {
+			tracker.Update(info)
+		}
+	}
+
+	waitErr := cmd.Wait()
+	stderrWg.Wait()
+
+	if userCtx.Err() != nil {
+		return nil, errors.New("ERR_CANCELLED")
+	}
+
+	if waitErr != nil {
 		stderrMu.Lock()
-		lastAttemptStderr = attemptStderr
-		stderrMu.Unlock()
-
-		if waitErr == nil {
-			// Succeeded!
-			downloadErr = nil
-			break
-		}
-
-		downloadErr = waitErr
-		log.Printf("[downloader attempt %d failed (%s)]: %v (stdout: %s | stderr: %s)", attemptIdx+1, strat.Name, waitErr, strings.Join(lastOutputLines, " | "), strings.Join(lastAttemptStderr, " | "))
-	}
-
-	var meta MediaMetadata
-	var fallbackDownloadedPath string
-
-	if downloadErr != nil {
-		if platform == PlatformTikTok {
-			log.Printf("[downloader] yt-dlp failed on TikTok, falling back to TikWM API: %s", targetURL)
-			dstPath := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_tw_%d.mp4", userID, time.Now().UnixNano()))
-			tikMeta, tikErr := d.downloadTikWM(userCtx, targetURL, dstPath)
-			if tikErr == nil {
-				downloadErr = nil
-				meta = *tikMeta
-				fallbackDownloadedPath = dstPath
-			} else {
-				log.Printf("[downloader] TikWM fallback failed: %v", tikErr)
-			}
-		} else if platform == PlatformInstagram {
-			log.Printf("[downloader] yt-dlp failed on Instagram, falling back to embed scraper: %s", targetURL)
-			dstPath := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_ig_%d.mp4", userID, time.Now().UnixNano()))
-			igMeta, igErr := d.downloadInstagramEmbed(userCtx, targetURL, dstPath)
-			if igErr == nil {
-				downloadErr = nil
-				meta = *igMeta
-				fallbackDownloadedPath = dstPath
-			} else {
-				log.Printf("[downloader] Instagram embed fallback failed: %v", igErr)
-			}
-		}
-	}
-
-	if downloadErr != nil {
-		log.Printf("[downloader] FINAL FAILURE for %s. Full stderr buffer (%d lines):\n%s", targetURL, len(lastAttemptStderr), strings.Join(lastAttemptStderr, "\n"))
-		last6 := lastAttemptStderr
+		last6 := attemptStderr
 		if len(last6) > 6 {
 			last6 = last6[len(last6)-6:]
 		}
+		stderrMu.Unlock()
+
 		errDetails := strings.Join(last6, " | ")
 		if errDetails == "" {
 			if len(lastOutputLines) > 6 {
@@ -560,47 +809,40 @@ func (d *Downloader) DownloadMedia(
 
 	tracker.Finish("⚡ <b>Download complete! Preparing to upload...</b>")
 
-	// 5. Read metadata directly from generated .info.json (Single-pass extraction)
-	if fallbackDownloadedPath == "" {
-		jsonPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.info.json", userID))
-		if jsonMatches, _ := filepath.Glob(jsonPattern); len(jsonMatches) > 0 {
-			if rawJSON, readErr := os.ReadFile(jsonMatches[0]); readErr == nil {
-				_ = json.Unmarshal(rawJSON, &meta)
-			}
-			for _, jm := range jsonMatches {
-				_ = os.Remove(jm)
+	// Locate info.json
+	var meta MediaMetadata
+	jsonPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.info.json", userID))
+	if jsonMatches, _ := filepath.Glob(jsonPattern); len(jsonMatches) > 0 {
+		if rawJSON, readErr := os.ReadFile(jsonMatches[0]); readErr == nil {
+			_ = json.Unmarshal(rawJSON, &meta)
+		}
+		for _, jm := range jsonMatches {
+			_ = os.Remove(jm)
+		}
+	}
+
+	// Locate final downloaded video file
+	filePattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.mp4", userID, meta.ID))
+	matches, _ := filepath.Glob(filePattern)
+	if len(matches) == 0 {
+		filePattern = filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.mp4", userID))
+		matches, _ = filepath.Glob(filePattern)
+	}
+	if len(matches) == 0 {
+		allMatches, _ := filepath.Glob(filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.*", userID)))
+		for _, m := range allMatches {
+			ext := strings.ToLower(filepath.Ext(m))
+			if ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".mov" || ext == ".ts" {
+				matches = append(matches, m)
+				break
 			}
 		}
 	}
 
-	// 6. Locate final downloaded video file
-	var targetFilePath string
-	if fallbackDownloadedPath != "" {
-		targetFilePath = fallbackDownloadedPath
-	} else {
-		filePattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_%s*.mp4", userID, meta.ID))
-		matches, _ := filepath.Glob(filePattern)
-		if len(matches) == 0 {
-			filePattern = filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.mp4", userID))
-			matches, _ = filepath.Glob(filePattern)
-		}
-		if len(matches) == 0 {
-			// Fallback glob if saved under other container
-			allMatches, _ := filepath.Glob(filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.*", userID)))
-			for _, m := range allMatches {
-				ext := strings.ToLower(filepath.Ext(m))
-				if ext == ".mp4" || ext == ".mkv" || ext == ".webm" || ext == ".mov" || ext == ".ts" {
-					matches = append(matches, m)
-					break
-				}
-			}
-		}
-
-		if len(matches) == 0 {
-			return nil, errors.New("ERR_DOWNLOAD_FAILED")
-		}
-		targetFilePath = matches[0]
+	if len(matches) == 0 {
+		return nil, errors.New("ERR_DOWNLOAD_FAILED")
 	}
+	targetFilePath := matches[0]
 
 	fileInfo, err := os.Stat(targetFilePath)
 	if err != nil {
@@ -614,7 +856,6 @@ func (d *Downloader) DownloadMedia(
 		return nil, errors.New("ERR_FILE_TOO_LARGE")
 	}
 
-	// Locate thumbnail if available
 	thumbPattern := filepath.Join(d.cfg.DownloadDir, fmt.Sprintf("%d_*.jpg", userID))
 	thumbMatches, _ := filepath.Glob(thumbPattern)
 	var thumbPath string
@@ -637,245 +878,6 @@ func (d *Downloader) DownloadMedia(
 		Width:         meta.Width,
 		Height:        meta.Height,
 	}, nil
-}
-
-// downloadTikWM downloads TikTok video without watermark via tikwm API as high-speed fallback
-func (d *Downloader) downloadTikWM(ctx context.Context, targetURL, dstPath string) (*MediaMetadata, error) {
-	reqURL := "https://www.tikwm.com/api/?url=" + urlQueryEscape(targetURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	client := &http.Client{Timeout: 45 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var r struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Title    string `json:"title"`
-			Duration int    `json:"duration"`
-			Width    int    `json:"width"`
-			Height   int    `json:"height"`
-			Play     string `json:"play"`
-			HDPlay   string `json:"hdplay"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, err
-	}
-	if r.Code != 0 || (r.Data.HDPlay == "" && r.Data.Play == "") {
-		return nil, fmt.Errorf("tikwm returned code %d: %s", r.Code, r.Msg)
-	}
-
-	link := r.Data.HDPlay
-	if link == "" {
-		link = r.Data.Play
-	}
-
-	dlReq, err := http.NewRequestWithContext(ctx, "GET", link, nil)
-	if err != nil {
-		return nil, err
-	}
-	dlReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-	dlResp, err := client.Do(dlReq)
-	if err != nil {
-		return nil, err
-	}
-	defer dlResp.Body.Close()
-
-	out, err := os.Create(dstPath)
-	if err != nil {
-		return nil, err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, dlResp.Body); err != nil {
-		_ = os.Remove(dstPath)
-		return nil, err
-	}
-
-	return &MediaMetadata{
-		Title:    r.Data.Title,
-		Duration: float64(r.Data.Duration),
-		Width:    r.Data.Width,
-		Height:   r.Data.Height,
-	}, nil
-}
-
-// downloadInstagramEmbed fetches embed captioned page and extracts video stream as fallback
-func (d *Downloader) downloadInstagramEmbed(ctx context.Context, targetURL, dstPath string) (*MediaMetadata, error) {
-	// 1. Extract Instagram shortcode / ID
-	matches := igRegex.FindStringSubmatch(targetURL)
-	var id string
-	if len(matches) > 1 && matches[1] != "" {
-		id = matches[1]
-	} else {
-		fbRegex := regexp.MustCompile(`(?i)(?:reel|reels|p|tv)\/([a-zA-Z0-9_-]+)`)
-		fbMatches := fbRegex.FindStringSubmatch(targetURL)
-		if len(fbMatches) > 1 && fbMatches[1] != "" {
-			id = fbMatches[1]
-		}
-	}
-	if id == "" {
-		return nil, fmt.Errorf("could not extract Instagram ID from %s", targetURL)
-	}
-
-	embedURL := fmt.Sprintf("https://www.instagram.com/reel/%s/embed/captioned/", id)
-	req, err := http.NewRequestWithContext(ctx, "GET", embedURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create embed request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	client := &http.Client{Timeout: 45 * time.Second}
-	if p := d.cfg.GetProxyURL(); p != "" {
-		if proxyParsed, pErr := url.Parse(p); pErr == nil {
-			client.Transport = &http.Transport{
-				Proxy: http.ProxyURL(proxyParsed),
-			}
-		}
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch instagram embed page: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("instagram embed returned HTTP %d", resp.StatusCode)
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read embed response body: %w", err)
-	}
-	htmlContent := string(bodyBytes)
-
-	// Extract video URL and caption from embed HTML
-	videoURL, caption := extractInstagramEmbedData(htmlContent)
-	if videoURL == "" {
-		return nil, fmt.Errorf("could not extract video URL from embed page for %s", id)
-	}
-
-	// Download video stream to dstPath
-	dlReq, err := http.NewRequestWithContext(ctx, "GET", videoURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create video stream request: %w", err)
-	}
-	dlReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-	dlReq.Header.Set("Referer", "https://www.instagram.com/")
-
-	dlResp, err := client.Do(dlReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download video stream: %w", err)
-	}
-	defer dlResp.Body.Close()
-
-	if dlResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("instagram video stream returned HTTP %d", dlResp.StatusCode)
-	}
-
-	out, err := os.Create(dstPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, dlResp.Body); err != nil {
-		_ = os.Remove(dstPath)
-		return nil, fmt.Errorf("failed to write video stream: %w", err)
-	}
-
-	if caption == "" {
-		caption = fmt.Sprintf("Instagram Reel %s", id)
-	}
-
-	return &MediaMetadata{
-		ID:    id,
-		Title: caption,
-		Ext:   "mp4",
-	}, nil
-}
-
-func extractInstagramEmbedData(htmlContent string) (videoURL, caption string) {
-	if idx := strings.Index(htmlContent, "contextJSON"); idx != -1 {
-		sub := htmlContent[idx:]
-		blockEnd := len(sub)
-		if end := strings.Index(sub, "</script>"); end != -1 && end < blockEnd {
-			blockEnd = end
-		}
-		block := sub[:blockEnd]
-		videoURL = extractVideoURLString(block)
-		caption = extractCaptionString(block)
-	}
-
-	if videoURL == "" {
-		videoURL = extractVideoURLString(htmlContent)
-	}
-	if caption == "" {
-		caption = extractCaptionString(htmlContent)
-	}
-
-	return videoURL, caption
-}
-
-var (
-	igVideoURLRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:\\"|")video_url(?:\\"|")\s*:\s*(?:\\"|")([^"\\ ]+)(?:\\"|")`),
-		regexp.MustCompile(`(?i)"video_url"\s*:\s*"([^"]+)"`),
-		regexp.MustCompile(`(?i)<video[^>]+src=["']([^"']+)["']`),
-	}
-	igCaptionRegexes = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:\\"|")text(?:\\"|")\s*:\s*(?:\\"|")([^"\\]+)(?:\\"|")`),
-		regexp.MustCompile(`(?i)(?:\\"|")caption(?:\\"|")\s*:\s*(?:\\"|")([^"\\]+)(?:\\"|")`),
-	}
-)
-
-func extractVideoURLString(content string) string {
-	for _, re := range igVideoURLRegexes {
-		if m := re.FindStringSubmatch(content); len(m) > 1 && m[1] != "" {
-			u := m[1]
-			u = strings.ReplaceAll(u, `\/`, `/`)
-			u = strings.ReplaceAll(u, `\\/`, `/`)
-			u = strings.ReplaceAll(u, `\u0026`, `&`)
-			u = strings.ReplaceAll(u, `&amp;`, `&`)
-			u = html.UnescapeString(u)
-			u = strings.TrimSpace(u)
-			if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
-				return u
-			}
-		}
-	}
-	return ""
-}
-
-func extractCaptionString(content string) string {
-	for _, re := range igCaptionRegexes {
-		if m := re.FindStringSubmatch(content); len(m) > 1 && m[1] != "" {
-			c := m[1]
-			c = strings.ReplaceAll(c, `\/`, `/`)
-			c = strings.ReplaceAll(c, `\n`, " ")
-			c = html.UnescapeString(c)
-			c = strings.TrimSpace(c)
-			if len(c) > 200 {
-				c = c[:200]
-			}
-			if c != "" {
-				return c
-			}
-		}
-	}
-	return ""
 }
 
 func urlQueryEscape(s string) string {
